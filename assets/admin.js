@@ -84,7 +84,7 @@
     fill(main, loading());
     window.scrollTo(0, 0);
     ({ surveys: viewSurveys, responses: viewResponses, people: viewPeople, dashboard: viewDashboard,
-      tags: viewTags, edit: viewEditor, person: viewPerson })[tab](arg);
+      tags: viewTags, edit: viewEditor, templates: viewTemplates, person: viewPerson })[tab](arg);
   }
   async function loadSurveys() {
     state.surveys = await call('listSurveys');
@@ -126,7 +126,10 @@
     });
     fill(main, 
       h('div', { class: 'row between' }, [h('h2', { text: 'アンケート' }),
-        h('button', { class: 'btn primary', text: '＋ 新規作成', onclick: function () { go('edit', null); } })]),
+        h('div', { class: 'row' }, [
+          (window.SURVEY_TEMPLATES || []).length ? h('button', { class: 'btn', text: 'テンプレートから作成', onclick: function () { go('templates'); } }) : null,
+          h('button', { class: 'btn primary', text: '＋ 新規作成', onclick: function () { go('edit', null); } })
+        ])]),
       items.length ? h('div', {}, items) : h('p', { class: 'muted', text: 'まだアンケートがありません。' })
     );
   }
@@ -138,8 +141,30 @@
     await run(async function () { var r = await call('duplicateSurvey', { survey_id: s.survey_id }); toast('複製しました（下書き）'); go('edit', r.survey_id); });
   }
 
+  /* ---------- テンプレート ---------- */
+  function viewTemplates() {
+    fill(main,
+      h('div', { class: 'row between' }, [
+        h('h2', { text: 'テンプレートから作成' }),
+        h('button', { class: 'btn small', type: 'button', text: '← 一覧へ', onclick: function () { go('surveys'); } })
+      ]),
+      h('p', { class: 'muted small', text: '選ぶと編集画面に読み込まれます。中身を確認・修正して「保存する」を押すと、下書きとして登録されます。' }),
+      h('div', {}, (window.SURVEY_TEMPLATES || []).map(function (t) {
+        return h('div', { class: 'card' }, [
+          h('strong', { text: t.name }),
+          h('p', { class: 'muted small', text: t.note + '（質問 ' + t.survey.questions.length + '問）' }),
+          h('button', { class: 'btn small primary', type: 'button', text: 'これを使う', onclick: function () {
+            go('edit', JSON.parse(JSON.stringify(t.survey)));
+          } })
+        ]);
+      }))
+    );
+  }
+
   /* ---------- アンケート編集 ---------- */
-  async function viewEditor(surveyId) {
+  // arg が文字列なら既存アンケートの編集、オブジェクトならテンプレートからの新規作成
+  async function viewEditor(arg) {
+    var surveyId = typeof arg === 'string' ? arg : null;
     var data = { title: '', description: '', community: '漢の福袋', questions: [
       { text: 'お名前', type: 'name', required: true, meaning_label: 'name' },
       { text: 'メールアドレス', help_text: '回答の控えをお送りします', type: 'email', required: true, meaning_label: 'email' }
@@ -147,6 +172,8 @@
     if (surveyId) {
       data = await run(function () { return call('getSurveyFull', { survey_id: surveyId }); });
       if (!data) return;
+    } else if (arg && typeof arg === 'object') {
+      data = arg;
     }
     var title = h('input', { type: 'text', value: data.title, placeholder: '例：2026年秋 合宿アンケート' });
     var community = h('input', { type: 'text', value: data.community || '漢の福袋' });

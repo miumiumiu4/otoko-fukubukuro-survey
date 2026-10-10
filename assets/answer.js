@@ -66,12 +66,19 @@
     return !firstBad;
   }
 
+  // 説明文の URL だけをリンクにする（それ以外は文字として表示）
+  function linkify(text) {
+    return String(text).split(/(https?:\/\/[^\s]+)/g).map(function (part, i) {
+      return i % 2 ? h('a', { href: part, target: '_blank', rel: 'noopener', text: part }) : part;
+    }).filter(function (p) { return p !== ''; });
+  }
+
   function renderForm() {
     var draft = loadDraft();
     var errBox = h('p', { class: 'form-error', hidden: true });
     var submit = h('button', { type: 'submit', class: 'btn primary block', text: '回答を送信する' });
     var form = h('form', { novalidate: true }, [
-      survey.description ? h('p', { class: 'desc', text: survey.description }) : null
+      survey.description ? h('p', { class: 'desc' }, linkify(survey.description)) : null
     ].concat(survey.questions.map(function (q, i) {
       var isGroup = q.type === 'choice' || q.type === 'scale';
       var label = h(isGroup ? 'div' : 'label', { class: 'qtext', for: isGroup ? null : 'q_' + q.question_id }, [
