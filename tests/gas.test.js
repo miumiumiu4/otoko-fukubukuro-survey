@@ -110,4 +110,34 @@ assert.strictEqual(post({ action: 'submit', survey_id: sid, answers }).ok, false
 // タグ保存
 assert.strictEqual(post({ action: 'saveTags', adminKey, tags: [{ tag: 'A', category: 'pain' }, { tag: '', category: 'x' }] }).data.count, 1);
 
+// 鍵と権限
+assert.strictEqual(post({ action: 'ping', adminKey }).data.user.role, 'owner');
+const ed = post({ action: 'createKey', adminKey, name: '友達A', role: 'editor' }).data;
+const vw = post({ action: 'createKey', adminKey, name: '友達B', role: 'viewer' }).data;
+assert.ok(ed.key && vw.key && ed.key !== vw.key);
+assert.strictEqual(post({ action: 'createKey', adminKey, name: '友達A', role: 'viewer' }).ok, false, '同名は作れない');
+assert.ok(!JSON.stringify(props).includes(ed.key), '鍵の値そのものは保存しない');
+const keys = post({ action: 'listKeys', adminKey }).data;
+assert.strictEqual(keys.length, 2);
+assert.ok(!('hash' in keys[0]), '一覧にハッシュを出さない');
+// 閲覧専用：見られるが変えられない
+let v = post({ action: 'ping', adminKey: vw.key }).data.user;
+assert.deepStrictEqual([v.name, v.role], ['友達B', 'viewer']);
+assert.ok(post({ action: 'listResponses', adminKey: vw.key, survey_id: sid }).ok);
+assert.ok(post({ action: 'dashboard', adminKey: vw.key }).ok);
+for (const a of ['saveSurvey', 'duplicateSurvey', 'setStatus', 'analyzePending', 'saveTags', 'listKeys', 'createKey', 'revokeKey']) {
+  const r = post({ action: a, adminKey: vw.key, survey_id: sid, status: 'draft', survey: full2, tags: [] });
+  assert.strictEqual(r.ok, false, a);
+  assert.ok(/権限がありません/.test(r.error), a + ': ' + r.error);
+}
+// 編集できる鍵：編集はできるが鍵の管理はできない
+assert.ok(post({ action: 'setStatus', adminKey: ed.key, survey_id: sid, status: 'published' }).ok);
+assert.strictEqual(post({ action: 'listKeys', adminKey: ed.key }).ok, false);
+assert.strictEqual(post({ action: 'createKey', adminKey: ed.key, name: 'x', role: 'editor' }).ok, false);
+// 停止すると使えなくなる
+assert.ok(post({ action: 'revokeKey', adminKey, id: vw.id }).ok);
+assert.strictEqual(post({ action: 'ping', adminKey: vw.key }).ok, false);
+assert.ok(post({ action: 'ping', adminKey: ed.key }).ok, '他の鍵は影響を受けない');
+assert.ok(post({ action: 'ping', adminKey }).ok, 'オーナーも影響を受けない');
+
 console.log('OK: all GAS tests passed');

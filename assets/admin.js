@@ -4,7 +4,11 @@
   var KEY_STORE = 'ofs-admin-key';
   var TYPE_LABELS = { text: '1行テキスト', textarea: '複数行テキスト', choice: '選択肢（1つ選ぶ）', scale: '10段階評価', email: 'メールアドレス', name: '名前' };
   var STATUS_LABELS = { draft: '下書き', published: '公開中', closed: '停止中' };
-  var state = { key: '', labels: {}, tab: 'surveys', surveys: [] };
+  var state = { key: '', labels: {}, tab: 'surveys', surveys: [], user: null };
+  // 権限：viewer（閲覧専用）< editor（編集できる）< owner（オーナー。鍵の管理もできる）
+  var ROLE_RANK = { viewer: 1, editor: 2, owner: 3 };
+  var ROLE_LABELS = { owner: 'オーナー', editor: '編集できる', viewer: '閲覧専用' };
+  function can(role) { return ROLE_RANK[(state.user || {}).role] >= ROLE_RANK[role]; }
 
   /* ---------- 共通 ---------- */
   function call(action, params) {
@@ -35,6 +39,8 @@
   function logout() {
     try { sessionStorage.removeItem(KEY_STORE); } catch (e) {}
     state.key = '';
+    state.user = null;
+    state.tab = 'surveys';
     renderLogin();
   }
   function renderLogin(msg) {
@@ -55,6 +61,8 @@
     try {
       var meta = await call('ping');
       state.labels = meta.labels;
+      // 鍵の仕組みが入る前のGASは user を返さないので、オーナー扱いにする
+      state.user = meta.user || { name: 'オーナー', role: 'owner' };
       try { sessionStorage.setItem(KEY_STORE, key); } catch (e) {}
       renderShell();
     } catch (e) {
@@ -68,14 +76,16 @@
   var main;
   function renderShell() {
     main = h('main', { class: 'admin-main' });
-    var tabs = h('nav', { class: 'tabs' }, TABS.map(function (t) {
+    var tabs = h('nav', { class: 'tabs' }, TABS.concat(can('owner') ? [['keys', '鍵']] : []).map(function (t) {
       return h('button', { type: 'button', 'data-tab': t[0], text: t[1], onclick: function () { go(t[0]); } });
     }));
     root.replaceChildren(
       h('header', { class: 'admin-head' }, [h('span', { class: 'logo', text: '漢の福袋 アンケート' }), tabs,
+        h('span', { class: 'muted small', text: state.user.role === 'owner' ? 'オーナー' : state.user.name + '（' + ROLE_LABELS[state.user.role] + '）' }),
         h('button', { class: 'btn small', type: 'button', text: 'ログアウト', onclick: logout })]),
       main
     );
+    if (state.tab === 'keys' && !can('owner')) state.tab = 'surveys';
     go(state.tab);
   }
   function go(tab, arg) {
@@ -84,7 +94,7 @@
     fill(main, loading());
     window.scrollTo(0, 0);
     ({ surveys: viewSurveys, responses: viewResponses, people: viewPeople, dashboard: viewDashboard,
-      tags: viewTags, edit: viewEditor, templates: viewTemplates, person: viewPerson })[tab](arg);
+      tags: viewTags, edit: viewEditor, templates: viewTemplates, keys: viewKeys, person: viewPerson })[tab](arg);
   }
   async function loadSurveys() {
     state.surveys = await call('listSurveys');
@@ -105,9 +115,9 @@
     if (!surveys) return;
     var items = surveys.map(function (s) {
       var statusBtns = [];
-      if (s.status !== 'published') statusBtns.push(h('button', { class: 'btn small', text: '公開する', onclick: function () { setStatus(s, 'published'); } }));
-      if (s.status === 'published') statusBtns.push(h('button', { class: 'btn small danger', text: '停止する', onclick: function () { setStatus(s, 'closed'); } }));
-      if (s.status === 'closed') statusBtns.push(h('button', { class: 'btn small', text: '下書きに戻す', onclick: function () { setStatus(s, 'draft'); } }));
+      if (!can('editor')) {} else if (s.status !== 'published') statusBtns.push(h('button', { class: 'btn small', text: '公開する', onclick: function () { setStatus(s, 'published'); } }));
+      if (can('editor') && s.status === 'published') statusBtns.push(h('button', { class: 'btn small danger', text: '停止する', onclick: function () { setStatus(s, 'closed'); } }));
+      if (can('editor') && s.status === 'closed') statusBtns.push(h('button', { class: 'btn small', text: '下書きに戻す', onclick: function () { setStatus(s, 'draft'); } }));
       return h('div', { class: 'card' }, [
         h('div', { class: 'row between' }, [
           h('div', {}, [h('strong', { text: s.title }), ' ', h('span', { class: 'badge ' + s.status, text: STATUS_LABELS[s.status] || s.status })]),
@@ -115,8 +125,8 @@
         ]),
         h('p', { class: 'muted small', text: surveyUrl(s.survey_id) }),
         h('div', { class: 'row' }, [
-          h('button', { class: 'btn small', text: '編集', onclick: function () { go('edit', s.survey_id); } }),
-          h('button', { class: 'btn small', text: '複製', onclick: function () { duplicate(s); } })
+          h('button', { class: 'btn small', text: can('editor') ? '編集' : '質問を見る', onclick: function () { go('edit', s.survey_id); } }),
+          can('editor') ? h('button', { class: 'btn small', text: '複製', onclick: function () { duplicate(s); } }) : null
         ].concat(statusBtns).concat([
           h('button', { class: 'btn small', text: 'URLをコピー', onclick: function () { copy(surveyUrl(s.survey_id)); } }),
           h('a', { class: 'btn small', href: surveyUrl(s.survey_id), target: '_blank', rel: 'noopener', text: '回答ページを開く' }),
@@ -127,8 +137,8 @@
     fill(main, 
       h('div', { class: 'row between' }, [h('h2', { text: 'アンケート' }),
         h('div', { class: 'row' }, [
-          (window.SURVEY_TEMPLATES || []).length ? h('button', { class: 'btn', text: 'テンプレートから作成', onclick: function () { go('templates'); } }) : null,
-          h('button', { class: 'btn primary', text: '＋ 新規作成', onclick: function () { go('edit', null); } })
+          can('editor') && (window.SURVEY_TEMPLATES || []).length ? h('button', { class: 'btn', text: 'テンプレートから作成', onclick: function () { go('templates'); } }) : null,
+          can('editor') ? h('button', { class: 'btn primary', text: '＋ 新規作成', onclick: function () { go('edit', null); } }) : null
         ])]),
       items.length ? h('div', {}, items) : h('p', { class: 'muted', text: 'まだアンケートがありません。' })
     );
@@ -244,7 +254,7 @@
 
     fill(main, 
       h('div', { class: 'row between' }, [
-        h('h2', { text: surveyId ? 'アンケートを編集' : 'アンケートを新規作成' }),
+        h('h2', { text: !can('editor') ? '質問の内容（閲覧専用）' : surveyId ? 'アンケートを編集' : 'アンケートを新規作成' }),
         h('button', { class: 'btn small', type: 'button', text: '← 一覧へ', onclick: function () { go('surveys'); } })
       ]),
       surveyId ? h('p', { class: 'muted small' }, ['回答URL：', h('a', { href: surveyUrl(surveyId), target: '_blank', rel: 'noopener', text: surveyUrl(surveyId) }),
@@ -259,13 +269,13 @@
       h('h3', { text: '質問' }),
       h('p', { class: 'muted small', text: '「意味ラベル」は、どのアンケートでも共通の分類です。AIはこれを手がかりに、人をまたいで悩み・変化・成果を集計します。' }),
       qWrap,
-      h('div', { class: 'row', style: 'margin:12px 0 24px' }, [
+      !can('editor') ? null : h('div', { class: 'row', style: 'margin:12px 0 24px' }, [
         h('button', { class: 'btn', type: 'button', text: '＋ 質問を追加', onclick: function () {
           questions.push({ text: '', type: 'textarea', required: false, meaning_label: 'other', choices: [] });
           renderQuestions();
         } })
       ]),
-      h('div', { class: 'row' }, [saveBtn,
+      !can('editor') ? null : h('div', { class: 'row' }, [saveBtn,
         h('span', { class: 'muted small', text: '新規作成したアンケートは「下書き」です。一覧で「公開する」を押すと回答を受け付けます。' })])
     );
   }
@@ -334,7 +344,7 @@
         ai.best_quote ? h('div', { class: 'quote' }, h('span', { class: 't', text: '「' + ai.best_quote + '」' })) : null
       ]) : h('div', { class: 'ai-box muted' }, [
         'AI分析はまだです。 ',
-        h('button', { class: 'btn small', type: 'button', text: '今すぐ分析', onclick: async function (e) {
+        !can('editor') ? null : h('button', { class: 'btn small', type: 'button', text: '今すぐ分析', onclick: async function (e) {
           e.stopPropagation();
           e.target.disabled = true;
           var res = await run(function () { return call('analyzeResponse', { response_id: r.response_id }); });
@@ -456,7 +466,7 @@
 
     fill(main, 
       h('h2', { text: 'AI分析ダッシュボード' }),
-      h('div', { class: 'row', style: 'margin-bottom:14px' }, [surveySelect(surveyId, true, function (v) { go('dashboard', v); }), analyzeBtn]),
+      h('div', { class: 'row', style: 'margin-bottom:14px' }, [surveySelect(surveyId, true, function (v) { go('dashboard', v); }), can('editor') ? analyzeBtn : null]),
       d.ai_ready ? null : h('p', { class: 'form-error', style: 'text-align:left', text: 'AIキー（ANTHROPIC_API_KEY）がGASのスクリプトプロパティに未設定です。設定すると10分ごとに自動で分析されます。' }),
       h('div', { class: 'stats' }, [
         h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(d.total_responses) }), h('div', { class: 'l', text: '回答数' })]),
@@ -494,13 +504,14 @@
     var tbody = h('tbody');
     function draw() {
       tbody.replaceChildren.apply(tbody, tags.map(function (t, i) {
-        var name = h('input', { type: 'text', value: t.tag, oninput: function () { t.tag = name.value; } });
-        var cat = h('select', { onchange: function () { t.category = cat.value; } }, Object.keys(CAT).map(function (c) {
+        var ro = !can('editor');
+        var name = h('input', { type: 'text', value: t.tag, disabled: ro, oninput: function () { t.tag = name.value; } });
+        var cat = h('select', { disabled: ro, onchange: function () { t.category = cat.value; } }, Object.keys(CAT).map(function (c) {
           return h('option', { value: c, text: CAT[c], selected: t.category === c });
         }));
-        var desc = h('input', { type: 'text', value: t.description, oninput: function () { t.description = desc.value; } });
+        var desc = h('input', { type: 'text', value: t.description, disabled: ro, oninput: function () { t.description = desc.value; } });
         return h('tr', {}, [h('td', {}, name), h('td', {}, cat), h('td', {}, desc),
-          h('td', {}, h('button', { class: 'btn small danger', type: 'button', text: '削除', onclick: function () { tags.splice(i, 1); draw(); } }))]);
+          h('td', {}, ro ? null : h('button', { class: 'btn small danger', type: 'button', text: '削除', onclick: function () { tags.splice(i, 1); draw(); } }))]);
       }));
     }
     draw();
@@ -510,12 +521,62 @@
       h('div', { class: 'table-wrap card' }, h('table', {}, [
         h('thead', {}, h('tr', {}, ['タグ', '分類', '説明', ''].map(function (t) { return h('th', { text: t }); }))), tbody
       ])),
-      h('div', { class: 'row' }, [
+      !can('editor') ? null : h('div', { class: 'row' }, [
         h('button', { class: 'btn', type: 'button', text: '＋ タグを追加', onclick: function () { tags.push({ tag: '', category: 'pain', description: '' }); draw(); } }),
         h('button', { class: 'btn primary', type: 'button', text: '保存する', onclick: async function () {
           await run(async function () { var r = await call('saveTags', { tags: tags }); toast(r.count + '件のタグを保存しました'); go('tags'); });
         } })
       ])
+    );
+  }
+
+  /* ---------- 鍵（オーナーだけ） ---------- */
+  async function viewKeys(created) {
+    var keys = await run(function () { return call('listKeys'); });
+    if (!keys) return;
+    var name = h('input', { type: 'text', id: 'key-name', placeholder: '渡す人の名前（例：田中さん）' });
+    var role = h('select', { id: 'key-role' }, [
+      h('option', { value: 'viewer', text: '閲覧専用（回答・分析を見るだけ）' }),
+      h('option', { value: 'editor', text: '編集できる（アンケートの作成・公開/停止も可）' })
+    ]);
+    var createBtn = h('button', { class: 'btn primary', type: 'button', text: '鍵を発行する', onclick: async function () {
+      createBtn.disabled = true;
+      var r = await run(function () { return call('createKey', { name: name.value, role: role.value }); });
+      createBtn.disabled = false;
+      if (r) viewKeys(r);
+    } });
+    var shown = created ? h('div', { class: 'card', style: 'border-color:var(--gold)' }, [
+      h('h3', { text: '「' + created.name + '」の鍵を発行しました（' + ROLE_LABELS[created.role] + '）' }),
+      h('p', { class: 'small', text: 'この鍵は今だけ表示されます。画面を離れると二度と表示できないので、今コピーして本人だけに送ってください。' }),
+      h('p', {}, h('code', { text: created.key, style: 'word-break:break-all;color:var(--gold-soft)' })),
+      h('div', { class: 'row' }, [
+        h('button', { class: 'btn small primary', type: 'button', text: '鍵をコピー', onclick: function () { copy(created.key); } }),
+        h('button', { class: 'btn small', type: 'button', text: '案内文をコピー', onclick: function () {
+          copy('漢の福袋アンケートの管理画面です。\n' + new URL('./admin.html', location.href).href +
+            '\n\nあなた専用の鍵（' + ROLE_LABELS[created.role] + '）：\n' + created.key + '\n\n※この鍵は他の人に共有しないでください。');
+        } })
+      ])
+    ]) : null;
+    fill(main,
+      h('h2', { text: '鍵の管理' }),
+      h('p', { class: 'muted small', text: '一人ずつ別の鍵を渡せます。停止すると、その人だけが入れなくなります（あなたや他の人の鍵はそのまま使えます）。' }),
+      shown,
+      h('div', { class: 'card' }, [
+        h('h3', { text: '新しい鍵を発行' }),
+        h('div', { style: 'display:grid;gap:8px' }, [name, role, h('div', {}, createBtn)])
+      ]),
+      h('div', { class: 'card table-wrap' }, keys.length ? h('table', {}, [
+        h('thead', {}, h('tr', {}, ['名前', '権限', '発行日', '最終利用', ''].map(function (t) { return h('th', { text: t }); }))),
+        h('tbody', {}, keys.map(function (k) {
+          var stop = h('button', { class: 'btn small danger', type: 'button', text: '停止', onclick: async function () {
+            if (stop.dataset.armed !== '1') { stop.dataset.armed = '1'; stop.textContent = '本当に停止する'; return; }
+            stop.disabled = true;
+            if (await run(function () { return call('revokeKey', { id: k.id }); })) { toast('「' + k.name + '」の鍵を停止しました'); go('keys'); }
+          } });
+          return h('tr', {}, [h('td', { text: k.name }), h('td', { text: ROLE_LABELS[k.role] || k.role }),
+            h('td', { text: fmt(k.created_at) }), h('td', { text: k.last_used ? fmt(k.last_used) + '（目安）' : '未使用' }), h('td', {}, stop)]);
+        }))
+      ]) : h('p', { class: 'muted small', text: 'まだ鍵を発行していません。今はオーナーの鍵（ADMIN_KEY）だけが使えます。' }))
     );
   }
 

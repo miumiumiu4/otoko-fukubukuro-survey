@@ -34,7 +34,7 @@ function createGas() {
   const ctx = {
     console,
     SpreadsheetApp: { openById: () => ss, create: () => ss },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; }, getProperties: () => Object.assign({}, props), deleteProperty: k => { delete props[k]; } }) },
     Utilities: {
       getUuid: () => crypto.randomUUID(), sleep() {},
       computeDigest: (_a, s) => Array.from(crypto.createHash('sha256').update(s, 'utf8').digest()).map(b => (b > 127 ? b - 256 : b)),
@@ -58,7 +58,7 @@ function createGas() {
   };
   vm.createContext(ctx);
   const dir = path.join(__dirname, '..', 'gas');
-  for (const f of ['Db.gs', 'Api.gs', 'Ai.gs', 'Mail.gs', 'Setup.gs']) vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
+  for (const f of ['Db.gs', 'Keys.gs', 'Api.gs', 'Ai.gs', 'Mail.gs', 'Setup.gs']) vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
   const post = body => ctx.doPost({ postData: { contents: JSON.stringify(body) } });
   return { ctx, post, props, sheets, mails, get claudeCalls() { return claudeCalls; } };
 }

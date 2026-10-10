@@ -9,20 +9,26 @@ var PUBLIC_ACTIONS = {
   submit: apiSubmit_
 };
 
+// 管理画面の操作と、必要な権限（viewer < editor < owner）
 var ADMIN_ACTIONS = {
-  ping: function () { return { labels: MEANING_LABELS, types: QUESTION_TYPES }; },
-  listSurveys: apiListSurveys_,
-  getSurveyFull: apiGetSurveyFull_,
-  saveSurvey: apiSaveSurvey_,
-  duplicateSurvey: apiDuplicateSurvey_,
-  setStatus: apiSetStatus_,
-  listResponses: apiListResponses_,
-  listRespondents: apiListRespondents_,
-  dashboard: apiDashboard_,
-  analyzePending: function (p) { return analyzePending_(Math.min(Number(p.limit) || 5, 10)); },
-  analyzeResponse: function (p) { return analyzeResponse_(String(p.response_id), true); },
-  listTags: function () { return readAll_('Tags').map(strip_); },
-  saveTags: apiSaveTags_
+  ping: ['viewer', function (p, user) {
+    return { labels: MEANING_LABELS, types: QUESTION_TYPES, user: user, roles: ROLES };
+  }],
+  listSurveys: ['viewer', apiListSurveys_],
+  getSurveyFull: ['viewer', apiGetSurveyFull_],
+  listResponses: ['viewer', apiListResponses_],
+  listRespondents: ['viewer', apiListRespondents_],
+  dashboard: ['viewer', apiDashboard_],
+  listTags: ['viewer', function () { return readAll_('Tags').map(strip_); }],
+  saveSurvey: ['editor', apiSaveSurvey_],
+  duplicateSurvey: ['editor', apiDuplicateSurvey_],
+  setStatus: ['editor', apiSetStatus_],
+  analyzePending: ['editor', function (p) { return analyzePending_(Math.min(Number(p.limit) || 5, 10)); }],
+  analyzeResponse: ['editor', function (p) { return analyzeResponse_(String(p.response_id), true); }],
+  saveTags: ['editor', apiSaveTags_],
+  listKeys: ['owner', apiListKeys_],
+  createKey: ['owner', apiCreateKey_],
+  revokeKey: ['owner', apiRevokeKey_]
 };
 
 function doGet() {
@@ -35,8 +41,9 @@ function doPost(e) {
     var action = String(p.action || '');
     if (PUBLIC_ACTIONS[action]) return json_({ ok: true, data: PUBLIC_ACTIONS[action](p) });
     if (ADMIN_ACTIONS[action]) {
-      checkAdmin_(p.adminKey);
-      return json_({ ok: true, data: ADMIN_ACTIONS[action](p) });
+      var user = authenticate_(p.adminKey);
+      requireRole_(user, ADMIN_ACTIONS[action][0]);
+      return json_({ ok: true, data: ADMIN_ACTIONS[action][1](p, user) });
     }
     throw new Error('不明な操作です: ' + action);
   } catch (err) {
@@ -46,15 +53,6 @@ function doPost(e) {
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
-}
-
-function checkAdmin_(key) {
-  var expected = PropertiesService.getScriptProperties().getProperty('ADMIN_KEY');
-  if (!expected) throw new Error('ADMIN_KEY が未設定です。');
-  if (!key || !safeEqual_(String(key), expected)) {
-    Utilities.sleep(800); // 総当たり対策のささやかな遅延
-    throw new Error('管理者キーが違います。');
-  }
 }
 
 function safeEqual_(a, b) {
