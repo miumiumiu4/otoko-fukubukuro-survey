@@ -1,0 +1,9 @@
+{
+  "name": "otoko-fukubukuro-survey",
+  "private": true,
+  "description": "漢の福袋 アンケート（GitHub Pages + GAS + スプレッドシート）",
+  "scripts": {
+    "test": "node tests/gas.test.js",
+    "deploy": "bash scripts/deploy.sh"
+  }
+}
