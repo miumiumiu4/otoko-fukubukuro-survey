@@ -2,7 +2,11 @@
   var api = window.SurveyApi, h = api.h, fmt = api.fmtDate;
   var root = document.getElementById('root');
   var KEY_STORE = 'ofs-admin-key';
-  var TYPE_LABELS = { text: '1行テキスト', textarea: '複数行テキスト', choice: '選択肢（1つ選ぶ）', scale: '10段階評価', email: 'メールアドレス', name: '名前' };
+  // Google フォームの形式に合わせた並び
+  var TYPE_LABELS = { text: '記述式（1行）', textarea: '段落（複数行）', choice: 'ラジオボタン（1つ選ぶ）',
+    checkbox: 'チェックボックス（複数選べる）', dropdown: 'プルダウン', scale: '均等目盛（数字で評価）',
+    date: '日付', time: '時刻', email: 'メールアドレス', name: '名前' };
+  var CHOICE_TYPES = { choice: true, checkbox: true, dropdown: true };
   var STATUS_LABELS = { draft: '下書き', published: '公開中', closed: '停止中' };
   var state = { key: '', labels: {}, tab: 'surveys', surveys: [], user: null };
   // 権限：viewer（閲覧専用）< editor（編集できる）< owner（オーナー。鍵の管理もできる）
@@ -173,13 +177,15 @@
 
   /* ---------- アンケート編集 ---------- */
   // arg が文字列なら既存アンケートの編集、オブジェクトならテンプレートからの新規作成
+  // arg：文字列なら既存アンケートを読み込む。オブジェクトならその内容（テンプレートやAIの案）を表示する
   async function viewEditor(arg) {
-    var surveyId = typeof arg === 'string' ? arg : null;
+    var surveyId = typeof arg === 'string' ? arg : (arg && arg.survey_id) || null;
+    var aiChanges = arg && typeof arg === 'object' ? arg.changes : null;
     var data = { title: '', description: '', community: '漢の福袋', questions: [
       { text: 'お名前', type: 'name', required: true, meaning_label: 'name' },
       { text: 'メールアドレス', help_text: '回答の控えをお送りします', type: 'email', required: true, meaning_label: 'email' }
     ] };
-    if (surveyId) {
+    if (typeof arg === 'string') {
       data = await run(function () { return call('getSurveyFull', { survey_id: surveyId }); });
       if (!data) return;
     } else if (arg && typeof arg === 'object') {
@@ -190,7 +196,9 @@
     var desc = h('textarea', { value: data.description || '', placeholder: '回答者へのひと言（任意）' });
     desc.style.minHeight = '80px';
     var qWrap = h('div');
-    var questions = data.questions.map(function (q) { return Object.assign({}, q, { choices: [].concat(q.choices || []) }); });
+    var questions = data.questions.map(function (q) {
+      return Object.assign({}, q, { choices: [].concat(q.choices || []), options: Object.assign({}, q.options || {}) });
+    });
 
     function renderQuestions() {
       qWrap.replaceChildren.apply(qWrap, questions.map(function (q, i) {
@@ -210,6 +218,21 @@
         var choices = h('textarea', { value: (q.choices || []).join('\n'), placeholder: '選択肢を1行に1つ',
           oninput: function () { q.choices = choices.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean); } });
         choices.style.minHeight = '90px';
+        var o = q.options;
+        var other = h('input', { type: 'checkbox', checked: !!o.allow_other, onchange: function () { o.allow_other = other.checked; } });
+        function numSelect(from, to, cur, set) {
+          var el = h('select', { onchange: function () { set(Number(el.value)); } });
+          for (var n = from; n <= to; n++) el.appendChild(h('option', { value: String(n), text: String(n), selected: n === cur }));
+          return el;
+        }
+        var scaleBox = q.type !== 'scale' ? null : h('div', { class: 'full', style: 'display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(140px,1fr))' }, [
+          h('div', {}, [h('span', { class: 'field-label', text: '最小' }), numSelect(0, 1, o.scale_min === 0 ? 0 : 1, function (v) { o.scale_min = v; })]),
+          h('div', {}, [h('span', { class: 'field-label', text: '最大' }), numSelect(2, 10, o.scale_max || 10, function (v) { o.scale_max = v; })]),
+          h('div', {}, [h('span', { class: 'field-label', text: '最小側の言葉（任意）' }),
+            h('input', { type: 'text', value: o.label_min || '', placeholder: '例：全く思わない', oninput: function (e) { o.label_min = e.target.value; } })]),
+          h('div', {}, [h('span', { class: 'field-label', text: '最大側の言葉（任意）' }),
+            h('input', { type: 'text', value: o.label_max || '', placeholder: '例：強くそう思う', oninput: function (e) { o.label_max = e.target.value; } })])
+        ]);
         function move(d) {
           var j = i + d;
           if (j < 0 || j >= questions.length) return;
@@ -233,13 +256,73 @@
             h('div', {}, [h('span', { class: 'field-label', text: '回答の形式' }), type]),
             h('div', {}, [h('span', { class: 'field-label', text: '意味ラベル（AI分析用）' }), label]),
             h('div', { class: 'full' }, [h('span', { class: 'field-label', text: '補足説明' }), help]),
-            q.type === 'choice' ? h('div', { class: 'full' }, [h('span', { class: 'field-label', text: '選択肢' }), choices]) : null,
-            h('label', { class: 'check small' }, [req, '必須'])
+            CHOICE_TYPES[q.type] ? h('div', { class: 'full' }, [h('span', { class: 'field-label', text: '選択肢（1行に1つ）' }), choices]) : null,
+            scaleBox,
+            h('div', { class: 'full row' }, [
+              h('label', { class: 'check small' }, [req, '必須']),
+              q.type === 'choice' || q.type === 'checkbox' ? h('label', { class: 'check small' }, [other, '「その他（自由記入）」を付ける']) : null
+            ])
           ])
         ]);
       }));
     }
     renderQuestions();
+
+    // ---- AI ----
+    function current() {
+      return { survey_id: surveyId || '', title: title.value, community: community.value, description: desc.value,
+        status: data.status, questions: questions };
+    }
+    var aiBox = h('div');
+    function aiBusy(btn, on) { btn.disabled = on; btn.textContent = on ? 'AIが考えています…（30秒〜1分）' : btn.dataset.label; }
+    function aiDraftForm() {
+      var f1 = h('textarea', { id: 'ai-purpose', placeholder: '例：11月の秋合宿の振り返り' });
+      var f2 = h('textarea', { id: 'ai-audience', placeholder: '例：合宿に参加したメンバー（30〜50代の経営者・会社員）' });
+      var f3 = h('textarea', { id: 'ai-goal', placeholder: '例：満足度と変化を知りたい。次回の企画と紹介文に使いたい' });
+      var btn = h('button', { class: 'btn primary', type: 'button', 'data-label': 'AIで作る', text: 'AIで作る', onclick: async function () {
+        aiBusy(btn, true);
+        var r = await run(function () { return call('aiDraftSurvey', { purpose: f1.value, audience: f2.value, goal: f3.value }); });
+        aiBusy(btn, false);
+        if (r) { toast('AIの案を読み込みました（まだ保存されていません）'); go('edit', Object.assign(r, { community: community.value })); }
+      } });
+      aiBox.replaceChildren(h('div', { style: 'display:grid;gap:8px;margin-top:10px' }, [
+        h('span', { class: 'field-label', text: '1. 何のアンケートですか？（イベント名や目的）' }), f1,
+        h('span', { class: 'field-label', text: '2. 誰に答えてもらいますか？' }), f2,
+        h('span', { class: 'field-label', text: '3. 回答から何を知りたいですか？ 何に使いますか？' }), f3,
+        h('div', {}, btn)
+      ]));
+    }
+    function aiReviseForm() {
+      var f = h('textarea', { id: 'ai-instruction', placeholder: '例：満足度の質問を0〜5の目盛りにして、参加日を聞く質問を足して' });
+      var btn = h('button', { class: 'btn primary', type: 'button', 'data-label': 'AIに直してもらう', text: 'AIに直してもらう', onclick: async function () {
+        aiBusy(btn, true);
+        var r = await run(function () { return call('aiReviseSurvey', { survey: current(), instruction: f.value }); });
+        aiBusy(btn, false);
+        if (r) {
+          toast('AIの修正案を読み込みました（まだ保存されていません）');
+          go('edit', Object.assign(r, { survey_id: surveyId || '', community: community.value, status: data.status }));
+        }
+      } });
+      aiBox.replaceChildren(h('div', { style: 'display:grid;gap:8px;margin-top:10px' }, [
+        h('span', { class: 'field-label', text: 'どう直したいですか？' }), f, h('div', {}, btn)
+      ]));
+    }
+    var aiPanel = !can('editor') ? null : h('div', { class: 'card ai-panel' }, [
+      h('div', { class: 'row between' }, [
+        h('strong', { text: 'AIに手伝ってもらう' }),
+        h('div', { class: 'row' }, [
+          surveyId ? null : h('button', { class: 'btn small', type: 'button', text: 'AIで作る（3つの質問に答える）', onclick: aiDraftForm }),
+          h('button', { class: 'btn small', type: 'button', text: 'AIに修正依頼', onclick: aiReviseForm })
+        ])
+      ]),
+      h('p', { class: 'muted small', text: 'AIの案は編集画面に入るだけです。中身を確かめて「保存する」を押すまで登録されません。' }),
+      aiBox
+    ]);
+    var changesBox = aiChanges && aiChanges.length ? h('div', { class: 'card', style: 'border-color:var(--gold)' }, [
+      h('strong', { text: 'AIの案です（まだ保存されていません）' }),
+      h('ul', { class: 'ai-changes' }, aiChanges.map(function (c) { return h('li', { text: c }); })),
+      h('p', { class: 'muted small', text: '確かめて問題なければ、いちばん下の「保存する」を押してください。やめる場合は保存せずに「← 一覧へ」で戻ります。' })
+    ]) : null;
 
     var saveBtn = h('button', { class: 'btn primary', type: 'button', text: '保存する', onclick: async function () {
       saveBtn.disabled = true;
@@ -257,6 +340,8 @@
         h('h2', { text: !can('editor') ? '質問の内容（閲覧専用）' : surveyId ? 'アンケートを編集' : 'アンケートを新規作成' }),
         h('button', { class: 'btn small', type: 'button', text: '← 一覧へ', onclick: function () { go('surveys'); } })
       ]),
+      changesBox,
+      aiPanel,
       surveyId ? h('p', { class: 'muted small' }, ['回答URL：', h('a', { href: surveyUrl(surveyId), target: '_blank', rel: 'noopener', text: surveyUrl(surveyId) }),
         '（状態：' + (STATUS_LABELS[data.status] || data.status) + '）']) : null,
       h('div', { class: 'card' }, [

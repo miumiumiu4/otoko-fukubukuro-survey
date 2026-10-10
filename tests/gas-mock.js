@@ -12,7 +12,8 @@ function createGas() {
       getDataRange: () => ({ getValues: () => data.map(r => r.slice()) }),
       getLastRow: () => data.length,
       getRange: (r, c, nr = 1, nc = 1) => ({
-        setValues(vals) { vals.forEach((row, i) => { data[r - 1 + i] = data[r - 1 + i] || []; row.forEach((v, j) => { data[r - 1 + i][c - 1 + j] = v; }); }); return this; },
+        getValues() { return Array.from({ length: nr }, (_, i) => Array.from({ length: nc }, (_, j) => ((data[r - 1 + i] || [])[c - 1 + j] ?? ''))); },
+      setValues(vals) { vals.forEach((row, i) => { data[r - 1 + i] = data[r - 1 + i] || []; row.forEach((v, j) => { data[r - 1 + i][c - 1 + j] = v; }); }); return this; },
         clearContent() { for (let i = 0; i < nr; i++) if (data[r - 1 + i]) data[r - 1 + i] = data[r - 1 + i].map(() => ''); return this; },
         setFontWeight() { return this; }
       }),
@@ -58,7 +59,7 @@ function createGas() {
   };
   vm.createContext(ctx);
   const dir = path.join(__dirname, '..', 'gas');
-  for (const f of ['Db.gs', 'Keys.gs', 'Api.gs', 'Ai.gs', 'Mail.gs', 'Setup.gs']) vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
+  for (const f of ['Db.gs', 'Keys.gs', 'Api.gs', 'Ai.gs', 'AiForm.gs', 'Mail.gs', 'Setup.gs']) vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
   const post = body => ctx.doPost({ postData: { contents: JSON.stringify(body) } });
   return { ctx, post, props, sheets, mails, get claudeCalls() { return claudeCalls; } };
 }

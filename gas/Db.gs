@@ -5,7 +5,8 @@
 
 var SCHEMA = {
   Surveys: ['survey_id', 'title', 'description', 'community', 'status', 'created_at', 'updated_at'],
-  Questions: ['survey_id', 'question_id', 'order', 'text', 'help_text', 'type', 'required', 'choices', 'meaning_label'],
+  // options は形式ごとの細かい設定（その他の欄、目盛りの範囲と両端の言葉）を JSON で持つ。後から足した列なので最後に置く
+  Questions: ['survey_id', 'question_id', 'order', 'text', 'help_text', 'type', 'required', 'choices', 'meaning_label', 'options'],
   Respondents: ['respondent_id', 'email', 'name', 'first_seen', 'last_seen', 'survey_count'],
   Responses: ['response_id', 'survey_id', 'respondent_id', 'submitted_at'],
   Answers: ['response_id', 'question_id', 'meaning_label', 'answer'],
@@ -31,7 +32,44 @@ var MEANING_LABELS = {
   other: 'その他'
 };
 
-var QUESTION_TYPES = ['text', 'textarea', 'choice', 'scale', 'email', 'name'];
+// Google フォームに合わせた形式。choice=ラジオボタン、checkbox=チェックボックス（複数回答）、dropdown=プルダウン、scale=均等目盛
+var QUESTION_TYPES = ['text', 'textarea', 'choice', 'checkbox', 'dropdown', 'scale', 'date', 'time', 'email', 'name'];
+var OTHER_PREFIX = 'その他: ';
+var MULTI_SEPARATOR = ' | ';
+
+/** 形式ごとの設定を、使える値だけに整える */
+function normalizeOptions_(type, o) {
+  o = o || {};
+  var out = {};
+  if (type === 'choice' || type === 'checkbox') out.allow_other = !!o.allow_other;
+  if (type === 'scale') {
+    var min = Number(o.scale_min) === 0 ? 0 : 1;
+    var max = Math.round(Number(o.scale_max));
+    if (!(max >= 2 && max <= 10)) max = 10;
+    out.scale_min = min; out.scale_max = max;
+    out.label_min = String(o.label_min || '').slice(0, 30);
+    out.label_max = String(o.label_max || '').slice(0, 30);
+  }
+  return out;
+}
+
+function parseOptions_(type, s) {
+  var o = {};
+  if (s && typeof s === 'object') o = s;
+  else { try { o = JSON.parse(s || '{}'); } catch (e) { o = {}; } }
+  return normalizeOptions_(type, o);
+}
+
+/** 見出し行が古い（列が足りない）シートを、今の SCHEMA に合わせる */
+function ensureHeaders_() {
+  Object.keys(SCHEMA).forEach(function (name) {
+    var sh = db_().getSheetByName(name);
+    if (!sh) return;
+    var header = SCHEMA[name];
+    var cur = sh.getRange(1, 1, 1, header.length).getValues()[0];
+    if (cur.join('|') !== header.join('|')) sh.getRange(1, 1, 1, header.length).setValues([header]);
+  });
+}
 var SURVEY_STATUSES = ['draft', 'published', 'closed'];
 var TAG_CATEGORIES = ['pain', 'change', 'outcome'];
 

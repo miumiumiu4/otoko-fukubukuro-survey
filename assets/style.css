@@ -177,3 +177,14 @@ tr.clickable:hover td { background: var(--panel-2); }
 .toast.error { border-color: var(--danger); }
 .login { max-width: 380px; margin: 12vh auto; padding: 0 16px; text-align: center; }
 .login form { display: grid; gap: 12px; margin-top: 20px; }
+
+/* 「その他」の自由記入 */
+.choice.other input[type=text] { flex: 1; min-width: 0; padding: 6px 8px; }
+select { appearance: auto; }
+input[type=date], input[type=time] {
+  width: 100%; background: #0f0f0f; border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px; font-size: 16px; color-scheme: dark;
+}
+.ai-panel { border-color: var(--gold); }
+.ai-panel textarea { min-height: 70px; }
+.ai-changes { margin: 6px 0 0; padding-left: 1.2em; font-size: 14px; }

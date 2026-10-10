@@ -26,6 +26,8 @@ var ADMIN_ACTIONS = {
   analyzePending: ['editor', function (p) { return analyzePending_(Math.min(Number(p.limit) || 5, 10)); }],
   analyzeResponse: ['editor', function (p) { return analyzeResponse_(String(p.response_id), true); }],
   saveTags: ['editor', apiSaveTags_],
+  aiDraftSurvey: ['editor', function (p) { return apiAiDraftSurvey_(p); }],
+  aiReviseSurvey: ['editor', function (p) { return apiAiReviseSurvey_(p); }],
   listKeys: ['owner', apiListKeys_],
   createKey: ['owner', apiCreateKey_],
   revokeKey: ['owner', apiRevokeKey_]
@@ -84,6 +86,7 @@ function questionsOf_(surveyId) {
       var o = strip_(q);
       o.required = q.required === true || String(q.required).toUpperCase() === 'TRUE';
       o.choices = splitList_(q.choices);
+      o.options = parseOptions_(q.type, q.options);
       return o;
     });
 }
@@ -98,9 +101,16 @@ function apiGetSurvey_(p) {
     community: s.community, status: s.status,
     questions: questionsOf_(s.survey_id).map(function (q) {
       return { question_id: q.question_id, text: q.text, help_text: q.help_text, type: q.type,
-        required: q.required, choices: q.choices };
+        required: q.required, choices: q.choices, options: q.options };
     })
   };
+}
+
+/** 選択肢にある答えか（「その他」を許す質問なら「その他: 〜」も可） */
+function checkChoice_(q, v) {
+  if (!q.choices.length || q.choices.indexOf(v) >= 0) return;
+  if (q.options.allow_other && v.indexOf(OTHER_PREFIX) === 0 && v.length > OTHER_PREFIX.length) return;
+  throw new Error('選択肢にない回答です：' + q.text);
 }
 
 function apiSubmit_(p) {
@@ -113,16 +123,25 @@ function apiSubmit_(p) {
 
   questions.forEach(function (q) {
     var v = input[q.question_id];
+    if (q.type === 'checkbox') {
+      var items = (Array.isArray(v) ? v : splitList_(v)).map(function (x) { return String(x).trim().slice(0, 500); })
+        .filter(function (x) { return x !== ''; });
+      items.forEach(function (x) { checkChoice_(q, x); });
+      v = items.join(MULTI_SEPARATOR);
+    }
     v = v === undefined || v === null ? '' : String(v).trim().slice(0, 5000);
     if (q.required && v === '') throw new Error('未回答の必須項目があります：' + q.text);
     if (v !== '' && (q.type === 'email' || q.meaning_label === 'email')) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) throw new Error('メールアドレスの形式が正しくありません。');
       email = email || v.toLowerCase();
     }
-    if (v !== '' && q.type === 'choice' && q.choices.length && q.choices.indexOf(v) < 0) {
-      throw new Error('選択肢にない回答です：' + q.text);
+    if (v !== '' && (q.type === 'choice' || q.type === 'dropdown')) checkChoice_(q, v);
+    if (v !== '' && q.type === 'scale') {
+      var n = Number(v);
+      if (!/^\d+$/.test(v) || n < q.options.scale_min || n > q.options.scale_max) throw new Error('目盛りの範囲で回答してください：' + q.text);
     }
-    if (v !== '' && q.type === 'scale' && !/^([1-9]|10)$/.test(v)) throw new Error('数値で回答してください：' + q.text);
+    if (v !== '' && q.type === 'date' && !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error('日付の形式が正しくありません：' + q.text);
+    if (v !== '' && q.type === 'time' && !/^\d{2}:\d{2}$/.test(v)) throw new Error('時刻の形式が正しくありません：' + q.text);
     if (v !== '' && (q.type === 'name' || q.meaning_label === 'name')) name = name || v;
     answers.push({ question_id: q.question_id, meaning_label: q.meaning_label, answer: v, text: q.text });
   });
@@ -220,9 +239,11 @@ function apiSaveSurvey_(p) {
         text: String(q.text).trim(), help_text: String(q.help_text || ''),
         type: type, required: !!q.required,
         choices: splitList_(q.choices).join(' | '),
-        meaning_label: label
+        meaning_label: label,
+        options: JSON.stringify(normalizeOptions_(type, q.options))
       };
     });
+    ensureHeaders_();
     // question_id は既存を引き継ぐので、編集しても過去の回答とつながったまま
     deleteWhere_('Questions', function (q) { return q.survey_id === surveyId; });
     append_('Questions', questionRows);
@@ -238,7 +259,7 @@ function apiDuplicateSurvey_(p) {
     title: src.title + '（コピー）', description: src.description, community: src.community,
     questions: src.questions.map(function (q) {
       return { text: q.text, help_text: q.help_text, type: q.type, required: q.required,
-        choices: q.choices, meaning_label: q.meaning_label };
+        choices: q.choices, meaning_label: q.meaning_label, options: q.options };
     })
   } });
 }

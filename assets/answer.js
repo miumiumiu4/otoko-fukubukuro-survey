@@ -12,41 +12,75 @@
   function loadDraft() { try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}'); } catch (e) { return {}; } }
   function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch (e) {} }
 
+  var OTHER = 'その他: ';
+  function isGroup(q) { return q.type === 'choice' || q.type === 'checkbox' || q.type === 'scale'; }
+  function opts(q) { return q.options || {}; }
+
+  // 選択肢（1つ／複数）。「その他」を許す質問は、最後に自由記入つきの「その他」を出す
+  function choiceList(q, value, multi) {
+    var name = 'q_' + q.question_id;
+    var picked = multi ? [].concat(value || []) : [value];
+    var otherText = '';
+    picked.forEach(function (v) { if (typeof v === 'string' && v.indexOf(OTHER) === 0) otherText = v.slice(OTHER.length); });
+    var items = q.choices.map(function (c) {
+      return h('label', { class: 'choice' }, [
+        h('input', { type: multi ? 'checkbox' : 'radio', name: name, value: c, checked: picked.indexOf(c) >= 0 }), h('span', { text: c })
+      ]);
+    });
+    if (opts(q).allow_other) {
+      var otherBox = h('input', { type: multi ? 'checkbox' : 'radio', name: name, value: '__other__', checked: !!otherText });
+      var otherInput = h('input', { type: 'text', name: 'o_' + q.question_id, value: otherText, placeholder: '自由に入力', 'aria-label': 'その他の内容' });
+      otherInput.addEventListener('input', function () { if (otherInput.value) otherBox.checked = true; });
+      items.push(h('label', { class: 'choice other' }, [otherBox, h('span', { text: 'その他：' }), otherInput]));
+    }
+    return h('div', { class: 'choices', role: multi ? 'group' : 'radiogroup' }, items);
+  }
+
   function inputFor(q, value) {
     var name = 'q_' + q.question_id;
     if (q.type === 'textarea') return h('textarea', { id: name, name: name, value: value || '' });
-    if (q.type === 'choice') {
-      return h('div', { class: 'choices', role: 'radiogroup' }, q.choices.map(function (c) {
-        return h('label', { class: 'choice' }, [
-          h('input', { type: 'radio', name: name, value: c, checked: value === c }), h('span', { text: c })
-        ]);
-      }));
+    if (q.type === 'choice') return choiceList(q, value, false);
+    if (q.type === 'checkbox') return choiceList(q, value, true);
+    if (q.type === 'dropdown') {
+      return h('select', { id: name, name: name }, [h('option', { value: '', text: '選択してください' })].concat(q.choices.map(function (c) {
+        return h('option', { value: c, text: c, selected: value === c });
+      })));
     }
     if (q.type === 'scale') {
-      var nums = [];
-      for (var i = 1; i <= 10; i++) nums.push(i);
-      return h('div', {}, [
-        h('div', { class: 'scale', role: 'radiogroup' }, nums.map(function (n) {
-          return h('label', {}, [
-            h('input', { type: 'radio', name: name, value: String(n), checked: String(value) === String(n), 'aria-label': String(n) }),
-            h('span', { text: String(n) })
-          ]);
-        })),
-        h('div', { class: 'scale-ends' }, [h('span', { text: '1 低い' }), h('span', { text: '10 高い' })])
-      ]);
+      var o = opts(q), min = o.scale_min === 0 ? 0 : 1, max = o.scale_max || 10, nums = [];
+      for (var i = min; i <= max; i++) nums.push(i);
+      var grid = h('div', { class: 'scale', role: 'radiogroup' }, nums.map(function (n) {
+        return h('label', {}, [
+          h('input', { type: 'radio', name: name, value: String(n), checked: String(value) === String(n), 'aria-label': String(n) }),
+          h('span', { text: String(n) })
+        ]);
+      }));
+      grid.style.gridTemplateColumns = 'repeat(' + Math.min(nums.length, 6) + ', 1fr)';
+      return h('div', {}, [grid, h('div', { class: 'scale-ends' }, [
+        h('span', { text: min + ' ' + (o.label_min || '低い') }), h('span', { text: max + ' ' + (o.label_max || '高い') })
+      ])]);
     }
-    var type = q.type === 'email' ? 'email' : 'text';
+    var type = { email: 'email', date: 'date', time: 'time' }[q.type] || 'text';
     var attrs = { id: name, name: name, type: type, value: value || '' };
     if (q.type === 'email') { attrs.autocomplete = 'email'; attrs.inputmode = 'email'; }
     if (q.type === 'name') attrs.autocomplete = 'name';
     return h('input', attrs);
   }
 
+  // checkbox は配列、それ以外は文字列で返す。「その他」は「その他: 〜」に置き換える
   function readValues(form) {
     var fd = new FormData(form), out = {};
-    survey.questions.forEach(function (q) { out[q.question_id] = String(fd.get('q_' + q.question_id) || '').trim(); });
+    survey.questions.forEach(function (q) {
+      var other = String(fd.get('o_' + q.question_id) || '').trim();
+      var vals = fd.getAll('q_' + q.question_id).map(function (v) {
+        return v === '__other__' ? (other ? OTHER + other : '') : String(v).trim();
+      }).filter(function (v) { return v !== ''; });
+      out[q.question_id] = q.type === 'checkbox' ? vals : (vals[0] || '');
+    });
     return out;
   }
+
+  function isEmpty(v) { return Array.isArray(v) ? v.length === 0 : !v; }
 
   function validate(form, values) {
     var firstBad = null;
@@ -54,7 +88,10 @@
       var box = form.querySelector('[data-q="' + q.question_id + '"]');
       var msg = '';
       var v = values[q.question_id];
-      if (q.required && !v) msg = 'この項目は必須です';
+      var otherPicked = !!form.querySelector('[name="q_' + q.question_id + '"][value="__other__"]:checked');
+      var otherEmpty = otherPicked && !String((form.querySelector('[name="o_' + q.question_id + '"]') || {}).value || '').trim();
+      if (otherEmpty) msg = '「その他」の内容を入力してください';
+      else if (q.required && isEmpty(v)) msg = 'この項目は必須です';
       else if (v && q.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) msg = 'メールアドレスの形式が正しくありません';
       box.classList.toggle('invalid', !!msg);
       var err = box.querySelector('.err');
@@ -80,8 +117,8 @@
     var form = h('form', { novalidate: true }, [
       survey.description ? h('p', { class: 'desc' }, linkify(survey.description)) : null
     ].concat(survey.questions.map(function (q, i) {
-      var isGroup = q.type === 'choice' || q.type === 'scale';
-      var label = h(isGroup ? 'div' : 'label', { class: 'qtext', for: isGroup ? null : 'q_' + q.question_id }, [
+      var group = isGroup(q);
+      var label = h(group ? 'div' : 'label', { class: 'qtext', for: group ? null : 'q_' + q.question_id }, [
         h('span', { class: 'num', text: 'Q' + (i + 1) + '.' }), q.text, q.required ? h('span', { class: 'req', text: '必須' }) : null
       ]);
       return h('div', { class: 'q', 'data-q': q.question_id }, [

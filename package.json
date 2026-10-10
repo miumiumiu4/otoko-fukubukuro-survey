@@ -3,7 +3,7 @@
   "private": true,
   "description": "漢の福袋 アンケート（GitHub Pages + GAS + スプレッドシート）",
   "scripts": {
-    "test": "node tests/gas.test.js",
+    "test": "node tests/gas.test.js && node tests/forms.test.js && node tools/voice-studio/test.js",
     "deploy": "bash scripts/deploy.sh"
   }
 }

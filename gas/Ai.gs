@@ -77,7 +77,7 @@ function analyzeResponse_(responseId, force) {
   var userText = '<survey>' + survey.title + '</survey>\n\n<existing_tags>\n' + tagList +
     '\n</existing_tags>\n\n<answers>\n' + lines.join('\n\n') + '\n</answers>';
 
-  var result = callClaude_(key, userText);
+  var result = callClaude_(key, AI_SYSTEM, userText, AI_SCHEMA, 'medium');
 
   var row = {
     response_id: responseId,
@@ -118,17 +118,18 @@ function analyzeResponse_(responseId, force) {
   return row;
 }
 
-function callClaude_(key, userText) {
+/** Claude に頼み、schema どおりの JSON を受け取る */
+function callClaude_(key, system, userText, schema, effort) {
   var body = {
     model: AI_MODEL,
     max_tokens: 16000,
     output_config: {
-      effort: 'medium',
-      format: { type: 'json_schema', schema: AI_SCHEMA }
+      effort: effort || 'medium',
+      format: { type: 'json_schema', schema: schema }
     },
     // 安全分類器で断られた場合はサーバー側で自動的に別モデルへ切り替える
     fallbacks: 'default',
-    system: AI_SYSTEM,
+    system: system,
     messages: [{ role: 'user', content: userText }]
   };
   var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {

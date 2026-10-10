@@ -27,7 +27,8 @@
 列はアンケートが増えても変わりません。
 
 - **Surveys**: survey_id, title, description, community, status(draft/published/closed), created_at, updated_at
-- **Questions**: survey_id, question_id, order, text, help_text, type(text/textarea/choice/scale/email/name), required, choices(`|`区切り), meaning_label
+- **Questions**: survey_id, question_id, order, text, help_text, type(text/textarea/choice/checkbox/dropdown/scale/date/time/email/name), required, choices(`|`区切り), meaning_label, options(JSON：その他の欄、目盛りの範囲と両端の言葉)
+  - チェックボックスの回答は Answers に `|` 区切りで1行、「その他」は `その他: 〜` で保存
 - **Respondents**: respondent_id(小文字メールの SHA-256 先頭32桁), email, name, first_seen, last_seen, survey_count
 - **Responses**: response_id, survey_id, respondent_id, submitted_at
 - **Answers**: response_id, question_id, meaning_label, answer
@@ -86,6 +87,13 @@ clasp を使わずブラウザで更新する場合:
 
 - 発行した鍵は一度だけ画面に表示される。保存されるのはハッシュだけ（スクリプトプロパティ `KEY_<id>`）。
 - 「停止」すると、その人の鍵だけが使えなくなる。
+
+## AIでアンケートを作る・直す
+
+編集画面の「AIに手伝ってもらう」から使う（編集できる鍵以上）。
+- **AIで作る**：3つの質問（何のアンケートか／誰に聞くか／何を知りたいか）に答えると、意味ラベル付きの質問一式を作る
+- **AIに修正依頼**：「満足度を0〜5の目盛りに」のように書くと、今の質問を直す。関係ない質問の question_id は残す
+- どちらも案を編集画面に入れるだけで、「保存する」を押すまで登録しない。`ANTHROPIC_API_KEY` が必要
 
 ## AI分析のしくみ
 
