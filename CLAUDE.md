@@ -10,3 +10,5 @@
 ## 使っているサービス
 - 音声（ナレーション）：ElevenLabs（https://elevenlabs.io/app/home）。公嗣さん本人の声のボイスを使う。ログインと支払い画面は本人が操作する。
 - 使い方動画の作り方は tools/howto-video/README.md。
+- 声入りの動画が必要なときは、公嗣さんに頼まず自動で作る：Google Drive コネクタで「ナレーション工房/依頼」に依頼 JSON を置き、5分ほどで「ナレーション工房/<ジョブ名>/」にできる MP3 を取り出して合成する（tools/voice-studio/README.md）。
+  - 人名など読み間違えやすい語は、依頼の pronunciations にひらがなで入れる（例：入山→いりやま）。
