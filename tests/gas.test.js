@@ -134,6 +134,16 @@ for (const a of ['saveSurvey', 'duplicateSurvey', 'setStatus', 'analyzePending',
 assert.ok(post({ action: 'setStatus', adminKey: ed.key, survey_id: sid, status: 'published' }).ok);
 assert.strictEqual(post({ action: 'listKeys', adminKey: ed.key }).ok, false);
 assert.strictEqual(post({ action: 'createKey', adminKey: ed.key, name: 'x', role: 'editor' }).ok, false);
+// 発行したオーナーの鍵：鍵の管理もできるが、元の ADMIN_KEY は止められない
+const ow = post({ action: 'createKey', adminKey, name: '入山さん', role: 'owner' }).data;
+assert.ok(ow.key.startsWith('o-'));
+assert.deepStrictEqual(post({ action: 'ping', adminKey: ow.key }).data.user.role, 'owner');
+const tmp = post({ action: 'createKey', adminKey: ow.key, name: '一時', role: 'viewer' }).data;
+assert.ok(post({ action: 'revokeKey', adminKey: ow.key, id: tmp.id }).ok);
+assert.strictEqual(post({ action: 'revokeKey', adminKey: ow.key, id: 'owner' }).ok, false);
+assert.ok(post({ action: 'ping', adminKey }).ok);
+assert.strictEqual(post({ action: 'createKey', adminKey, name: 'x', role: 'god' }).ok, false);
+
 // 停止すると使えなくなる
 assert.ok(post({ action: 'revokeKey', adminKey, id: vw.id }).ok);
 assert.strictEqual(post({ action: 'ping', adminKey: vw.key }).ok, false);

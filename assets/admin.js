@@ -81,7 +81,7 @@
     }));
     root.replaceChildren(
       h('header', { class: 'admin-head' }, [h('span', { class: 'logo', text: '漢の福袋 アンケート' }), tabs,
-        h('span', { class: 'muted small', text: state.user.role === 'owner' ? 'オーナー' : state.user.name + '（' + ROLE_LABELS[state.user.role] + '）' }),
+        h('span', { class: 'muted small', text: state.user.id === 'owner' ? 'オーナー' : state.user.name + '（' + ROLE_LABELS[state.user.role] + '）' }),
         h('button', { class: 'btn small', type: 'button', text: 'ログアウト', onclick: logout })]),
       main
     );
@@ -537,7 +537,8 @@
     var name = h('input', { type: 'text', id: 'key-name', placeholder: '渡す人の名前（例：田中さん）' });
     var role = h('select', { id: 'key-role' }, [
       h('option', { value: 'viewer', text: '閲覧専用（回答・分析を見るだけ）' }),
-      h('option', { value: 'editor', text: '編集できる（アンケートの作成・公開/停止も可）' })
+      h('option', { value: 'editor', text: '編集できる（アンケートの作成・公開/停止も可）' }),
+      h('option', { value: 'owner', text: 'オーナー（すべて＋鍵の発行・停止も可）' })
     ]);
     var createBtn = h('button', { class: 'btn primary', type: 'button', text: '鍵を発行する', onclick: async function () {
       createBtn.disabled = true;
@@ -559,7 +560,7 @@
     ]) : null;
     fill(main,
       h('h2', { text: '鍵の管理' }),
-      h('p', { class: 'muted small', text: '一人ずつ別の鍵を渡せます。停止すると、その人だけが入れなくなります（あなたや他の人の鍵はそのまま使えます）。' }),
+      h('p', { class: 'muted small', text: '一人ずつ別の鍵を渡せます。停止すると、その人だけが入れなくなります（あなたや他の人の鍵はそのまま使えます）。元のオーナーの鍵（ADMIN_KEY）は、ここからは停止できません。' }),
       shown,
       h('div', { class: 'card' }, [
         h('h3', { text: '新しい鍵を発行' }),

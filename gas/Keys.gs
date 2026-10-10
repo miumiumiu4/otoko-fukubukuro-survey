@@ -1,6 +1,7 @@
 /**
  * 鍵（ログインキー）と権限。
- * - owner  : スクリプトプロパティ ADMIN_KEY の持ち主。すべての操作＋鍵の発行・停止ができる
+ * - owner  : すべての操作＋鍵の発行・停止ができる。スクリプトプロパティ ADMIN_KEY（元の持ち主。管理画面からは
+ *            停止できない）と、「鍵」タブで発行したオーナーの鍵がある
  * - editor : アンケートの作成・編集・公開/停止、AI分析、タグ編集ができる（鍵の管理はできない）
  * - viewer : 閲覧専用。回答・人別・AI分析の結果・タグを見るだけ
  * owner 以外の鍵は管理画面の「鍵」タブで発行する。値は保存せず、SHA-256 のハッシュだけを
@@ -65,11 +66,11 @@ function apiCreateKey_(p) {
   var name = String(p.name || '').trim().slice(0, 30);
   var role = String(p.role || '');
   if (!name) throw new Error('名前を入力してください。');
-  if (role !== 'editor' && role !== 'viewer') throw new Error('権限は「編集できる」か「閲覧専用」を選んでください。');
+  if (!ROLES[role]) throw new Error('権限を選んでください。');
   if (apiListKeys_().some(function (k) { return k.name === name && !k.disabled; })) {
     throw new Error('「' + name + '」の鍵はすでにあります。先に停止してから作り直してください。');
   }
-  var key = (role === 'viewer' ? 'v-' : 'e-') + Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+  var key = role.charAt(0) + '-' + Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
   var id = newId_('k');
   PropertiesService.getScriptProperties().setProperty(KEY_PREFIX + id, JSON.stringify({
     name: name, role: role, hash: sha256Hex_(key), created_at: nowIso_(), last_used: '', disabled: false

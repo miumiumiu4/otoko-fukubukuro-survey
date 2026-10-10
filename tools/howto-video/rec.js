@@ -38,7 +38,7 @@ const people = [
     const r = gas.post({ action: 'submit', survey_id: sid, answers: ans }).data;
     cur = i; gas.ctx.analyzeResponse_(r.response_id, false);
   }
-  const vkey = P({ action: 'createKey', name: '入山さん', role: 'viewer' }).data.key;
+  const vkey = P({ action: 'createKey', name: '入山さん', role: 'owner' }).data.key;
 
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 780, height: 1688 }, deviceScaleFactor: 1,
@@ -75,7 +75,7 @@ const people = [
   mark('login'); await wait(1500);
   await p.locator('input[type=password]').pressSequentially(vkey.slice(0, 14), { delay: 40 });
   await p.fill('input[type=password]', vkey); await wait(800);
-  await tap('button[type=submit]'); await p.waitForSelector('text=入山さん（閲覧専用）'); await wait(2500);
+  await tap('button[type=submit]'); await p.waitForSelector('text=入山さん（オーナー）'); await wait(2500);
   mark('surveys'); await wait(4500);
   mark('responses'); await tap('nav >> text=回答一覧'); await p.waitForSelector('tr.clickable'); await wait(2000);
   await tap('tr.clickable'); await wait(2500);
