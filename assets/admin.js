@@ -15,8 +15,67 @@
   function can(role) { return ROLE_RANK[(state.user || {}).role] >= ROLE_RANK[role]; }
 
   /* ---------- 共通 ---------- */
-  function call(action, params) {
+  // GAS（スプレッドシート）への問い合わせは1回1〜数秒かかる。
+  // 読むだけの問い合わせは結果を手元に覚えておき、タブを切り替えたときはすぐ表示する。
+  // 覚えてから30秒以上たっていたら、表示はそのままにして裏で取り直し、変わっていれば描き直す。
+  var READ_ACTIONS = { ping: 1, listSurveys: 1, getSurveyFull: 1, listResponses: 1, listRespondents: 1, dashboard: 1, listTags: 1, listKeys: 1 };
+  var FRESH_MS = 30000;
+  var cache = {};
+  function fetchApi(action, params) {
     return api.call(action, Object.assign({ adminKey: state.key }, params || {}));
+  }
+  function cacheKey(action, params) { return action + ':' + JSON.stringify(params || {}); }
+  function clearCache() { cache = {}; }
+  function call(action, params) {
+    if (!READ_ACTIONS[action]) {
+      // 書き込みのあとは、覚えている内容が古くなるので捨てる
+      return fetchApi(action, params).then(function (r) { clearCache(); return r; });
+    }
+    // 人別の履歴は、全回答をもう持っていればその中から絞り込む（問い合わせなし）
+    if (action === 'listResponses' && params && params.respondent_id && !params.survey_id) {
+      var all = cache[cacheKey('listResponses', {})];
+      if (all && all.data) {
+        return Promise.resolve({ questions: [], responses: all.data.responses.filter(function (r) { return r.respondent_id === params.respondent_id; }) });
+      }
+    }
+    var key = cacheKey(action, params), hit = cache[key];
+    if (hit && hit.data) {
+      if (Date.now() - hit.at > FRESH_MS && !hit.refreshing) refresh(key, action, params);
+      return Promise.resolve(hit.data);
+    }
+    if (hit && hit.pending) return hit.pending;
+    var pending = fetchApi(action, params).then(function (data) {
+      cache[key] = { data: data, at: Date.now() };
+      return data;
+    }, function (e) { delete cache[key]; throw e; });
+    cache[key] = { pending: pending };
+    return pending;
+  }
+  function refresh(key, action, params) {
+    var hit = cache[key];
+    hit.refreshing = true;
+    var tab = state.tab, arg = state.arg;
+    fetchApi(action, params).then(function (data) {
+      var changed = JSON.stringify(data) !== JSON.stringify(hit.data);
+      cache[key] = { data: data, at: Date.now() };
+      // 見ている画面が同じで、中身が変わっていたら静かに描き直す（編集中の画面は描き直さない）
+      if (changed && state.tab === tab && state.arg === arg && tab !== 'edit' && tab !== 'templates') go(tab, arg, true);
+    }, function () { hit.refreshing = false; });
+  }
+  // ログイン直後に、よく見る画面のデータをまとめて取っておく
+  function prefetch() {
+    ['listSurveys', 'listRespondents', 'listTags'].forEach(function (a) { call(a).catch(function () {}); });
+    call('listResponses', {}).catch(function () {});
+    call('dashboard', { survey_id: '' }).catch(function () {});
+    if (can('owner')) call('listKeys').catch(function () {});
+    call('listSurveys').then(function (list) {
+      list.forEach(function (s) { call('listResponses', { survey_id: s.survey_id }).catch(function () {}); });
+    }).catch(function () {});
+  }
+  function reloadAll() {
+    clearCache();
+    prefetch();
+    go(state.tab, state.arg);
   }
   function toast(msg, isError) {
     var t = h('div', { class: 'toast' + (isError ? ' error' : ''), role: 'status', text: msg });
@@ -31,6 +90,11 @@
   }
   // replaceChildren は null を文字 "null" として出してしまうので取り除く
   function fill(el) { el.replaceChildren.apply(el, [].slice.call(arguments, 1).filter(function (n) { return n !== null && n !== undefined && n !== false; })); }
+  // 今も見ている画面のときだけ描く（読み込み中に別のタブへ移った場合、古い結果で上書きしない）
+  function paint(token) {
+    if (token !== navSeq) return;
+    fill.apply(null, [main].concat([].slice.call(arguments, 1)));
+  }
   function loading() { return h('div', { class: 'spinner' }); }
   function surveyUrl(id) { return new URL('./?s=' + encodeURIComponent(id), location.href).href; }
   function copy(text) {
@@ -44,6 +108,7 @@
     try { sessionStorage.removeItem(KEY_STORE); } catch (e) {}
     state.key = '';
     state.user = null;
+    clearCache();
     state.tab = 'surveys';
     renderLogin();
   }
@@ -67,6 +132,7 @@
       state.labels = meta.labels;
       // 鍵の仕組みが入る前のGASは user を返さないので、オーナー扱いにする
       state.user = meta.user || { name: 'オーナー', role: 'owner' };
+      prefetch();
       try { sessionStorage.setItem(KEY_STORE, key); } catch (e) {}
       renderShell();
     } catch (e) {
@@ -86,20 +152,37 @@
     root.replaceChildren(
       h('header', { class: 'admin-head' }, [h('span', { class: 'logo', text: '漢の福袋 アンケート' }), tabs,
         h('span', { class: 'muted small', text: state.user.id === 'owner' ? 'オーナー' : state.user.name + '（' + ROLE_LABELS[state.user.role] + '）' }),
+        h('button', { class: 'btn small', type: 'button', text: '最新にする', title: 'スプレッドシートから取り直す', onclick: reloadAll }),
         h('button', { class: 'btn small', type: 'button', text: 'ログアウト', onclick: logout })]),
       main
     );
     if (state.tab === 'keys' && !can('owner')) state.tab = 'surveys';
     go(state.tab);
   }
-  function go(tab, arg) {
+  var navSeq = 0;
+  // quiet=true のときは、くるくるを出さずに今の画面を差し替える（裏で取り直したとき用）
+  function go(tab, arg, quiet) {
     state.tab = tab;
+    state.arg = arg;
+    var seq = ++navSeq;
     root.querySelectorAll('.tabs button').forEach(function (b) { b.classList.toggle('active', b.dataset.tab === tab); });
-    fill(main, loading());
-    window.scrollTo(0, 0);
-    ({ surveys: viewSurveys, responses: viewResponses, people: viewPeople, dashboard: viewDashboard,
-      tags: viewTags, edit: viewEditor, templates: viewTemplates, keys: viewKeys, person: viewPerson })[tab](arg);
+    var y = window.scrollY;
+    if (!quiet) { fill(main, loading()); window.scrollTo(0, 0); }
+    var view = ({ surveys: viewSurveys, responses: viewResponses, people: viewPeople, dashboard: viewDashboard,
+      tags: viewTags, edit: viewEditor, templates: viewTemplates, keys: viewKeys, person: viewPerson })[tab];
+    Promise.resolve(view(arg)).then(function () {
+      if (quiet) window.scrollTo(0, y);
+      // 読み込みに失敗して、くるくるだけが残った場合は、やり直しボタンを出す
+      if (seq === navSeq && main.children.length === 1 && main.firstChild.classList.contains('spinner')) {
+        fill(main, h('div', { class: 'notice' }, [
+          h('h2', { text: '読み込めませんでした' }),
+          h('p', { text: '通信が混み合っているか、スプレッドシートへの接続に時間がかかっています。' }),
+          h('button', { class: 'btn primary', type: 'button', text: 'もう一度読み込む', onclick: reloadAll })
+        ]));
+      }
+    });
   }
+
   async function loadSurveys() {
     state.surveys = await call('listSurveys');
     return state.surveys;
@@ -115,6 +198,7 @@
 
   /* ---------- アンケート一覧 ---------- */
   async function viewSurveys() {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var surveys = await run(loadSurveys);
     if (!surveys) return;
     var items = surveys.map(function (s) {
@@ -138,7 +222,7 @@
         ]))
       ]);
     });
-    fill(main, 
+    paint(token, 
       h('div', { class: 'row between' }, [h('h2', { text: 'アンケート' }),
         h('div', { class: 'row' }, [
           can('editor') && (window.SURVEY_TEMPLATES || []).length ? h('button', { class: 'btn', text: 'テンプレートから作成', onclick: function () { go('templates'); } }) : null,
@@ -157,7 +241,8 @@
 
   /* ---------- テンプレート ---------- */
   function viewTemplates() {
-    fill(main,
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
+    paint(token,
       h('div', { class: 'row between' }, [
         h('h2', { text: 'テンプレートから作成' }),
         h('button', { class: 'btn small', type: 'button', text: '← 一覧へ', onclick: function () { go('surveys'); } })
@@ -179,6 +264,7 @@
   // arg が文字列なら既存アンケートの編集、オブジェクトならテンプレートからの新規作成
   // arg：文字列なら既存アンケートを読み込む。オブジェクトならその内容（テンプレートやAIの案）を表示する
   async function viewEditor(arg) {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var surveyId = typeof arg === 'string' ? arg : (arg && arg.survey_id) || null;
     var aiChanges = arg && typeof arg === 'object' ? arg.changes : null;
     var data = { title: '', description: '', community: '漢の福袋', questions: [
@@ -335,7 +421,7 @@
       saveBtn.disabled = false;
     } });
 
-    fill(main, 
+    paint(token, 
       h('div', { class: 'row between' }, [
         h('h2', { text: !can('editor') ? '質問の内容（閲覧専用）' : surveyId ? 'アンケートを編集' : 'アンケートを新規作成' }),
         h('button', { class: 'btn small', type: 'button', text: '← 一覧へ', onclick: function () { go('surveys'); } })
@@ -367,12 +453,13 @@
 
   /* ---------- 回答一覧 ---------- */
   async function viewResponses(surveyId) {
-    if (!(await run(loadSurveys))) { if (!state.surveys.length) fill(main, h('p', { class: 'muted', text: 'アンケートがありません。' })); return; }
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
+    if (!(await run(loadSurveys))) { if (!state.surveys.length) paint(token, h('p', { class: 'muted', text: 'アンケートがありません。' })); return; }
     surveyId = surveyId || (state.surveys[0] && state.surveys[0].survey_id);
-    if (!surveyId) { fill(main, h('p', { class: 'muted', text: 'アンケートがありません。' })); return; }
+    if (!surveyId) { paint(token, h('p', { class: 'muted', text: 'アンケートがありません。' })); return; }
     var body = h('div', {}, [loading()]);
     var exportAllBtn = h('button', { class: 'btn small', type: 'button', text: '全アンケートを縦持ちCSVで出力', onclick: exportLongCsv });
-    fill(main, 
+    paint(token, 
       h('h2', { text: '回答一覧' }),
       h('div', { class: 'row', style: 'margin-bottom:14px' }, [surveySelect(surveyId, false, function (v) { go('responses', v); }), exportAllBtn]),
       body
@@ -469,6 +556,7 @@
 
   /* ---------- 人別 ---------- */
   async function viewPeople() {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var people = await run(function () { return call('listRespondents'); });
     if (!people) return;
     var q = h('input', { type: 'search', placeholder: '名前・メールで絞り込み' });
@@ -487,7 +575,7 @@
     }
     q.addEventListener('input', draw);
     draw();
-    fill(main, 
+    paint(token, 
       h('h2', { text: '人別（回答者 ' + people.length + '人）' }),
       h('div', { class: 'row', style: 'margin-bottom:12px' }, [q]),
       h('div', { class: 'table-wrap card' }, h('table', {}, [
@@ -498,9 +586,10 @@
   }
 
   async function viewPerson(p) {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var data = await run(function () { return call('listResponses', { respondent_id: p.respondent_id }); });
     if (!data) return;
-    fill(main, 
+    paint(token, 
       h('div', { class: 'row between' }, [
         h('h2', { text: (p.name || '名前なし') + ' さんの回答履歴' }),
         h('button', { class: 'btn small', type: 'button', text: '← 人別へ', onclick: function () { go('people'); } })
@@ -514,6 +603,7 @@
 
   /* ---------- AI分析ダッシュボード ---------- */
   async function viewDashboard(surveyId) {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     if (!(await run(loadSurveys))) return;
     surveyId = surveyId || '';
     var d = await run(function () { return call('dashboard', { survey_id: surveyId }); });
@@ -549,7 +639,7 @@
         go('dashboard', surveyId);
       } });
 
-    fill(main, 
+    paint(token, 
       h('h2', { text: 'AI分析ダッシュボード' }),
       h('div', { class: 'row', style: 'margin-bottom:14px' }, [surveySelect(surveyId, true, function (v) { go('dashboard', v); }), can('editor') ? analyzeBtn : null]),
       d.ai_ready ? null : h('p', { class: 'form-error', style: 'text-align:left', text: 'AIキー（ANTHROPIC_API_KEY）がGASのスクリプトプロパティに未設定です。設定すると10分ごとに自動で分析されます。' }),
@@ -583,6 +673,7 @@
 
   /* ---------- タグ ---------- */
   async function viewTags() {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var tags = await run(function () { return call('listTags'); });
     if (!tags) return;
     var CAT = { pain: '悩み', change: '変化', outcome: '成果' };
@@ -600,7 +691,7 @@
       }));
     }
     draw();
-    fill(main, 
+    paint(token, 
       h('h2', { text: 'タグ辞書' }),
       h('p', { class: 'muted small', text: 'AIはここにあるタグを優先して使います（表記ゆれ防止）。似たタグを1つにまとめると集計がきれいになります。新しいタグはAIが自動で追加します。' }),
       h('div', { class: 'table-wrap card' }, h('table', {}, [
@@ -617,6 +708,7 @@
 
   /* ---------- 鍵（オーナーだけ） ---------- */
   async function viewKeys(created) {
+    var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var keys = await run(function () { return call('listKeys'); });
     if (!keys) return;
     var name = h('input', { type: 'text', id: 'key-name', placeholder: '渡す人の名前（例：田中さん）' });
@@ -643,7 +735,7 @@
         } })
       ])
     ]) : null;
-    fill(main,
+    paint(token,
       h('h2', { text: '鍵の管理' }),
       h('p', { class: 'muted small', text: '一人ずつ別の鍵を渡せます。停止すると、その人だけが入れなくなります（あなたや他の人の鍵はそのまま使えます）。元のオーナーの鍵（ADMIN_KEY）は、ここからは停止できません。' }),
       shown,
