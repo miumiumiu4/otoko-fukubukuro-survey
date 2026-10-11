@@ -29,7 +29,7 @@
   function call(action, params) {
     if (!READ_ACTIONS[action]) {
       // 書き込みのあとは、覚えている内容が古くなるので捨てる
-      return fetchApi(action, params).then(function (r) { clearCache(); return r; });
+      return fetchApi(action, params).then(function (r) { clearCache(); prefetch(); return r; });
     }
     // 人別の履歴は、全回答をもう持っていればその中から絞り込む（問い合わせなし）
     if (action === 'listResponses' && params && params.respondent_id && !params.survey_id) {
@@ -100,6 +100,35 @@
   function copy(text) {
     navigator.clipboard.writeText(text).then(function () { toast('コピーしました'); }, function () { prompt('コピーしてください', text); });
   }
+  // AI とのやりとり（お金がかからないように、APIではなく Claude のチャットを使う）
+  // ① 依頼文をコピー → ② Claude に貼る → ③ 返ってきた答えを貼り付けて「読み込む」
+  function aiExchange(makePrompt, onAnswer, loadLabel) {
+    var promptBox = h('textarea', { readonly: true, 'aria-label': '依頼文', style: 'min-height:90px;font-size:12px', hidden: true });
+    var copyBtn = h('button', { class: 'btn primary small', type: 'button', text: '① 依頼文をコピー', onclick: function () {
+      var text;
+      try { text = makePrompt(); } catch (e) { toast(e.message, true); return; }
+      promptBox.value = text;
+      var shown = function () {
+        promptBox.hidden = false; promptBox.focus(); promptBox.select();
+        toast('自動でコピーできませんでした。下の枠の文章をすべて選んでコピーしてください。', true);
+      };
+      try {
+        navigator.clipboard.writeText(text).then(function () { toast('依頼文をコピーしました。Claude のチャットに貼ってください。'); }, shown);
+      } catch (e) { shown(); }
+    } });
+    var answer = h('textarea', { placeholder: '③ Claude の答え（```json で始まる部分）をそのまま貼り付け', style: 'min-height:90px' });
+    var loadBtn = h('button', { class: 'btn primary small', type: 'button', text: loadLabel || '読み込む', onclick: async function () {
+      loadBtn.disabled = true;
+      try { await onAnswer(answer.value); } catch (e) { toast(e.message, true); }
+      loadBtn.disabled = false;
+    } });
+    return h('div', { style: 'display:grid;gap:8px;margin-top:10px' }, [
+      h('div', { class: 'row' }, [copyBtn,
+        h('a', { class: 'btn small', href: 'https://claude.ai/new', target: '_blank', rel: 'noopener', text: '② Claude を開く' })]),
+      promptBox, answer, h('div', {}, loadBtn)
+    ]);
+  }
+
   function labelName(l) { return state.labels[l] || l || ''; }
   function list(s) { return String(s || '').split(/\s*\|\s*/).filter(Boolean); }
 
@@ -360,37 +389,40 @@
         status: data.status, questions: questions };
     }
     var aiBox = h('div');
-    function aiBusy(btn, on) { btn.disabled = on; btn.textContent = on ? 'AIが考えています…（30秒〜1分）' : btn.dataset.label; }
+    function need(v, msg) { if (!String(v || '').trim()) throw new Error(msg); return String(v).trim(); }
+    function loadSurveyAnswer(text, keepIds) {
+      var r = AiPrompts.normalizeSurvey(AiPrompts.extractJson(text), state.labels);
+      // 今のアンケートに無い question_id を書いてきたら、新しい質問として扱う
+      var known = {};
+      (keepIds || []).forEach(function (id) { if (id) known[id] = true; });
+      r.questions.forEach(function (q) { if (!known[q.question_id]) q.question_id = ''; });
+      toast('AIの案を読み込みました（まだ保存されていません）');
+      go('edit', Object.assign(r, { survey_id: surveyId || '', community: community.value, status: data.status }));
+    }
     function aiDraftForm() {
       var f1 = h('textarea', { id: 'ai-purpose', placeholder: '例：11月の秋合宿の振り返り' });
       var f2 = h('textarea', { id: 'ai-audience', placeholder: '例：合宿に参加したメンバー（30〜50代の経営者・会社員）' });
       var f3 = h('textarea', { id: 'ai-goal', placeholder: '例：満足度と変化を知りたい。次回の企画と紹介文に使いたい' });
-      var btn = h('button', { class: 'btn primary', type: 'button', 'data-label': 'AIで作る', text: 'AIで作る', onclick: async function () {
-        aiBusy(btn, true);
-        var r = await run(function () { return call('aiDraftSurvey', { purpose: f1.value, audience: f2.value, goal: f3.value }); });
-        aiBusy(btn, false);
-        if (r) { toast('AIの案を読み込みました（まだ保存されていません）'); go('edit', Object.assign(r, { community: community.value })); }
-      } });
       aiBox.replaceChildren(h('div', { style: 'display:grid;gap:8px;margin-top:10px' }, [
         h('span', { class: 'field-label', text: '1. 何のアンケートですか？（イベント名や目的）' }), f1,
         h('span', { class: 'field-label', text: '2. 誰に答えてもらいますか？' }), f2,
         h('span', { class: 'field-label', text: '3. 回答から何を知りたいですか？ 何に使いますか？' }), f3,
-        h('div', {}, btn)
+        aiExchange(function () {
+          return AiPrompts.draft({ purpose: need(f1.value, '1. 何のアンケートかを書いてください。'),
+            audience: need(f2.value, '2. 誰に答えてもらうかを書いてください。'),
+            goal: need(f3.value, '3. 何を知りたいかを書いてください。') }, state.labels);
+        }, function (text) { loadSurveyAnswer(text, []); }, '④ 読み込んで編集画面に入れる')
       ]));
     }
     function aiReviseForm() {
       var f = h('textarea', { id: 'ai-instruction', placeholder: '例：満足度の質問を0〜5の目盛りにして、参加日を聞く質問を足して' });
-      var btn = h('button', { class: 'btn primary', type: 'button', 'data-label': 'AIに直してもらう', text: 'AIに直してもらう', onclick: async function () {
-        aiBusy(btn, true);
-        var r = await run(function () { return call('aiReviseSurvey', { survey: current(), instruction: f.value }); });
-        aiBusy(btn, false);
-        if (r) {
-          toast('AIの修正案を読み込みました（まだ保存されていません）');
-          go('edit', Object.assign(r, { survey_id: surveyId || '', community: community.value, status: data.status }));
-        }
-      } });
       aiBox.replaceChildren(h('div', { style: 'display:grid;gap:8px;margin-top:10px' }, [
-        h('span', { class: 'field-label', text: 'どう直したいですか？' }), f, h('div', {}, btn)
+        h('span', { class: 'field-label', text: 'どう直したいですか？' }), f,
+        aiExchange(function () {
+          return AiPrompts.revise(current(), need(f.value, 'どう直したいかを書いてください。'), state.labels);
+        }, function (text) {
+          loadSurveyAnswer(text, questions.map(function (q) { return q.question_id; }));
+        }, '④ 読み込んで編集画面に入れる')
       ]));
     }
     var aiPanel = !can('editor') ? null : h('div', { class: 'card ai-panel' }, [
@@ -401,7 +433,7 @@
           h('button', { class: 'btn small', type: 'button', text: 'AIに修正依頼', onclick: aiReviseForm })
         ])
       ]),
-      h('p', { class: 'muted small', text: 'AIの案は編集画面に入るだけです。中身を確かめて「保存する」を押すまで登録されません。' }),
+      h('p', { class: 'muted small', text: 'お金がかからないように、Claude のチャット（今の定額プラン）を使います。依頼文をコピーして Claude に貼り、返ってきた答えをここに貼り戻してください。AIの案は編集画面に入るだけで、「保存する」を押すまで登録されません。' }),
       aiBox
     ]);
     var changesBox = aiChanges && aiChanges.length ? h('div', { class: 'card', style: 'border-color:var(--gold)' }, [
@@ -514,16 +546,7 @@
           .concat(list(ai.change_tags).map(function (t) { return h('span', { class: 'tag change', text: t }); }))),
         ai.outcome_numbers ? h('div', { text: '成果：' + list(ai.outcome_numbers).join('、') }) : null,
         ai.best_quote ? h('div', { class: 'quote' }, h('span', { class: 't', text: '「' + ai.best_quote + '」' })) : null
-      ]) : h('div', { class: 'ai-box muted' }, [
-        'AI分析はまだです。 ',
-        !can('editor') ? null : h('button', { class: 'btn small', type: 'button', text: '今すぐ分析', onclick: async function (e) {
-          e.stopPropagation();
-          e.target.disabled = true;
-          var res = await run(function () { return call('analyzeResponse', { response_id: r.response_id }); });
-          if (res) { toast('分析しました'); r.ai = res; e.target.closest('td').replaceChildren(responseDetail(r)); }
-          else e.target.disabled = false;
-        } })
-      ])
+      ]) : h('div', { class: 'ai-box muted', text: 'AI分析はまだです。「AI分析」タブからまとめて分析できます。' })
     ]);
   }
 
@@ -627,26 +650,36 @@
       } });
     }
 
-    var analyzeBtn = h('button', { class: 'btn small primary', type: 'button', text: '未分析をAIで分析（最大5件）', disabled: !d.pending || !d.ai_ready,
-      onclick: async function () {
-        analyzeBtn.disabled = true;
-        analyzeBtn.textContent = '分析中…（1件10〜30秒）';
-        var r = await run(function () { return call('analyzePending', { limit: 5 }); });
-        if (r) {
-          toast(r.analyzed + '件分析しました' + (r.errors.length ? '（エラー' + r.errors.length + '件）' : ''), !!r.errors.length);
-          if (r.errors.length) console.warn(r.errors);
-        }
-        go('dashboard', surveyId);
-      } });
+    // 未分析の回答を Claude のチャットで分析する
+    var BATCH = 15;
+    // 依頼文はボタンを押した瞬間に作るので、必要な回答とタグは先に読み込んでおく
+    var allRes = can('editor') && d.pending ? await run(function () { return call('listResponses', {}); }) : null;
+    var allTags = can('editor') && d.pending ? (await run(function () { return call('listTags'); })) || [] : [];
+    var analyzePanel = !can('editor') || !d.pending ? null : h('div', { class: 'card ai-panel' }, [
+      h('strong', { text: '未分析の回答をAIで分析する（' + d.pending + '件）' }),
+      h('p', { class: 'muted small', text: 'お金がかからないように、Claude のチャットを使います。一度に' + BATCH + '件ずつ依頼文を作ります。名前とメールアドレスは依頼文に入れません。' }),
+      aiExchange(function () {
+        if (!allRes) throw new Error('回答を読み込めませんでした。「最新にする」を押してから試してください。');
+        var pending = allRes.responses.filter(function (r) { return !r.ai && (!surveyId || r.survey_id === surveyId); }).slice(0, BATCH);
+        if (!pending.length) throw new Error('未分析の回答はありません。「最新にする」を押してから試してください。');
+        return AiPrompts.analysis(pending, allTags);
+      }, async function (text) {
+        var items = AiPrompts.normalizeAnalysis(AiPrompts.extractJson(text));
+        var r = await call('importAnalysis', { items: items });
+        toast(r.saved + '件の分析を保存しました' + (r.new_tags.length ? '（新しいタグ：' + r.new_tags.join('、') + '）' : '') +
+          (r.skipped.length ? '。見つからないIDが' + r.skipped.length + '件ありました' : ''), !!r.skipped.length);
+        reloadAll();
+      }, '④ 分析結果を保存する')
+    ]);
 
     paint(token, 
       h('h2', { text: 'AI分析ダッシュボード' }),
-      h('div', { class: 'row', style: 'margin-bottom:14px' }, [surveySelect(surveyId, true, function (v) { go('dashboard', v); }), can('editor') ? analyzeBtn : null]),
-      d.ai_ready ? null : h('p', { class: 'form-error', style: 'text-align:left', text: 'AIキー（ANTHROPIC_API_KEY）がGASのスクリプトプロパティに未設定です。設定すると10分ごとに自動で分析されます。' }),
+      h('div', { class: 'row', style: 'margin-bottom:14px' }, [surveySelect(surveyId, true, function (v) { go('dashboard', v); })]),
+      analyzePanel,
       h('div', { class: 'stats' }, [
         h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(d.total_responses) }), h('div', { class: 'l', text: '回答数' })]),
         h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(d.analyzed) }), h('div', { class: 'l', text: 'AI分析済み' })]),
-        h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(d.pending) }), h('div', { class: 'l', text: '未分析（10分ごとに自動）' })])
+        h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(d.pending) }), h('div', { class: 'l', text: '未分析' })])
       ]),
       h('div', { class: 'grid2' }, [
         h('div', { class: 'card' }, [h('h3', { text: '悩みタグ ランキング' }), bars(d.pain_ranking)]),

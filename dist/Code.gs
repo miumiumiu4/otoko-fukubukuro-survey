@@ -283,11 +283,8 @@ var ADMIN_ACTIONS = {
   saveSurvey: ['editor', apiSaveSurvey_],
   duplicateSurvey: ['editor', apiDuplicateSurvey_],
   setStatus: ['editor', apiSetStatus_],
-  analyzePending: ['editor', function (p) { return analyzePending_(Math.min(Number(p.limit) || 5, 10)); }],
-  analyzeResponse: ['editor', function (p) { return analyzeResponse_(String(p.response_id), true); }],
   saveTags: ['editor', apiSaveTags_],
-  aiDraftSurvey: ['editor', function (p) { return apiAiDraftSurvey_(p); }],
-  aiReviseSurvey: ['editor', function (p) { return apiAiReviseSurvey_(p); }],
+  importAnalysis: ['editor', function (p) { return apiImportAnalysis_(p); }],
   listKeys: ['owner', apiListKeys_],
   createKey: ['owner', apiCreateKey_],
   revokeKey: ['owner', apiRevokeKey_]
@@ -619,7 +616,6 @@ function apiDashboard_(p) {
     total_responses: responses.length,
     analyzed: analyzed,
     pending: responses.length - analyzed,
-    ai_ready: !!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY'),
     pain_ranking: rank(pain),
     change_ranking: rank(change),
     recommend_ranking: rank(targets),
@@ -642,303 +638,83 @@ function apiSaveTags_(p) {
 
 // ===== Ai.gs =====
 /**
- * AI分析：1回答ごとに Claude API で構造化し、AI_Analysis シートへ保存する。
- * APIキーはスクリプトプロパティ ANTHROPIC_API_KEY（コードには書かない）。
- * 既存タグ（Tags シート）を優先して使わせ、表記ゆれを防ぐ。新しいタグは自動で Tags に追加。
+ * AI分析の結果を受け取って保存する。
+ * お金がかからないように、このシステムは AI の API を呼ばない。
+ * 管理画面が「AIへの依頼文」を作り、公嗣さんが Claude のチャット（定額プラン）に貼って、
+ * 返ってきた JSON を管理画面に貼り戻す。ここではその JSON を検証して AI_Analysis と Tags に保存するだけ。
  */
 
-var AI_MODEL = 'claude-opus-5-5';
-
-var AI_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['summary', 'before_state', 'after_state', 'pain_tags', 'change_tags',
-    'outcome_numbers', 'recommend_target', 'best_quote', 'new_tags'],
-  properties: {
-    summary: { type: 'string', description: '回答全体の要約（2〜3文）' },
-    before_state: { type: 'string', description: '参加前の状態（1〜2文。不明なら空文字）' },
-    after_state: { type: 'string', description: '参加後の状態（1〜2文。不明なら空文字）' },
-    pain_tags: { type: 'array', items: { type: 'string' }, description: '悩みタグ（0〜4個）' },
-    change_tags: { type: 'array', items: { type: 'string' }, description: '変化タグ（0〜4個）' },
-    outcome_numbers: { type: 'array', items: { type: 'string' },
-      description: '数字で表せる成果（例: 体重 -5kg、売上 月+30万円）。回答に書かれたものだけ' },
-    recommend_target: { type: 'array', items: { type: 'string' }, description: 'この体験を勧めたい人物像（0〜3個）' },
-    best_quote: { type: 'string', description: '紹介文にそのまま使える、本人の言葉の一言（原文を活かす。なければ空文字）' },
-    new_tags: {
-      type: 'array',
-      description: '既存タグに無く、今回新しく作ったタグだけ',
-      items: {
-        type: 'object', additionalProperties: false, required: ['tag', 'category', 'description'],
-        properties: {
-          tag: { type: 'string' },
-          category: { type: 'string', enum: ['pain', 'change', 'outcome'] },
-          description: { type: 'string' }
-        }
-      }
-    }
-  }
-};
-
-var AI_SYSTEM = [
-  'あなたはコミュニティ「漢の福袋」のアンケート回答を分析する担当です。',
-  '回答者1人分の回答を読み、顧客分析に使える形に構造化してください。',
-  '',
-  'ルール:',
-  '- 回答に書かれていないことは推測で補わない。根拠がなければ空文字・空配列にする。',
-  '- タグは「既存タグ一覧」にあるものを最優先で使う。意味が近ければ既存タグを選び、言い換えて新タグを作らない。',
-  '- どうしても当てはまらない時だけ新タグを作り、new_tags にも入れる。新タグは8文字前後の短い名詞句にする。',
-  '- best_quote は本人の言葉をなるべくそのまま使い、紹介文に載せられる一文にする（誤字の修正程度はよい）。',
-  '- outcome_numbers は数字が含まれる成果だけ。'
-].join('\n');
-
-function analyzeResponse_(responseId, force) {
-  var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
-  if (!key) throw new Error('ANTHROPIC_API_KEY が未設定です（スクリプトプロパティに設定してください）。');
-
-  var existing = readAll_('AI_Analysis').filter(function (a) { return a.response_id === responseId; })[0];
-  if (existing && !force) return strip_(existing);
-
-  var response = readAll_('Responses').filter(function (r) { return r.response_id === responseId; })[0];
-  if (!response) throw new Error('回答が見つかりません: ' + responseId);
-  var survey = findSurvey_(response.survey_id);
-  var qText = {};
-  questionsOf_(survey.survey_id).forEach(function (q) { qText[q.question_id] = q.text; });
-  var answers = readAll_('Answers').filter(function (a) { return a.response_id === responseId; });
-  var tags = readAll_('Tags');
-
-  var lines = answers
-    .filter(function (a) { return a.meaning_label !== 'email' && a.answer !== ''; })
-    .map(function (a) {
-      var label = MEANING_LABELS[a.meaning_label] || a.meaning_label;
-      return '■ [' + a.meaning_label + '：' + label + '] ' + (qText[a.question_id] || a.question_id) + '\n' + a.answer;
-    });
-  var tagList = TAG_CATEGORIES.map(function (c) {
-    var names = tags.filter(function (t) { return t.category === c; }).map(function (t) { return t.tag; });
-    return c + ': ' + (names.length ? names.join(' / ') : '（まだなし）');
-  }).join('\n');
-
-  var userText = '<survey>' + survey.title + '</survey>\n\n<existing_tags>\n' + tagList +
-    '\n</existing_tags>\n\n<answers>\n' + lines.join('\n\n') + '\n</answers>';
-
-  var result = callClaude_(key, AI_SYSTEM, userText, AI_SCHEMA, 'medium');
-
-  var row = {
-    response_id: responseId,
-    summary: result.summary,
-    before_state: result.before_state,
-    after_state: result.after_state,
-    pain_tags: (result.pain_tags || []).join(' | '),
-    change_tags: (result.change_tags || []).join(' | '),
-    outcome_numbers: (result.outcome_numbers || []).join(' | '),
-    recommend_target: (result.recommend_target || []).join(' | '),
-    best_quote: result.best_quote,
-    analyzed_at: nowIso_()
-  };
+function apiImportAnalysis_(p) {
+  var items = Array.isArray(p.items) ? p.items : [];
+  if (!items.length) throw new Error('取り込む分析結果がありません。');
+  if (items.length > 200) throw new Error('一度に取り込めるのは200件までです。');
 
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    var again = readAll_('AI_Analysis').filter(function (a) { return a.response_id === responseId; })[0];
-    if (again) updateRow_('AI_Analysis', again._row, row);
-    else append_('AI_Analysis', [row]);
-
-    // 使われたタグのうち Tags に無いものを登録（new_tags の説明を優先）
+    var responses = {};
+    readAll_('Responses').forEach(function (r) { responses[r.response_id] = true; });
+    var existing = {};
+    readAll_('AI_Analysis').forEach(function (a) { existing[a.response_id] = a; });
     var known = {};
     readAll_('Tags').forEach(function (t) { known[t.category + '\u0000' + t.tag] = true; });
-    var desc = {};
-    (result.new_tags || []).forEach(function (t) { desc[t.category + '\u0000' + t.tag] = t.description; });
-    var add = [];
-    [['pain', result.pain_tags], ['change', result.change_tags]].forEach(function (pair) {
-      (pair[1] || []).forEach(function (t) {
-        var k = pair[0] + '\u0000' + t;
-        if (!known[k]) { known[k] = true; add.push({ tag: t, category: pair[0], description: desc[k] || '' }); }
+
+    var add = [], newTags = [], saved = 0, skipped = [];
+    var now = nowIso_();
+    items.forEach(function (it) {
+      var id = String(it && it.response_id || '');
+      if (!responses[id]) { skipped.push(id || '（IDなし）'); return; }
+      var row = {
+        response_id: id,
+        summary: text_(it.summary, 1000),
+        before_state: text_(it.before_state, 500),
+        after_state: text_(it.after_state, 500),
+        pain_tags: list_(it.pain_tags).join(' | '),
+        change_tags: list_(it.change_tags).join(' | '),
+        outcome_numbers: list_(it.outcome_numbers).join(' | '),
+        recommend_target: list_(it.recommend_target).join(' | '),
+        best_quote: text_(it.best_quote, 300),
+        analyzed_at: now
+      };
+      if (existing[id]) updateRow_('AI_Analysis', existing[id]._row, row);
+      else { add.push(row); existing[id] = row; }
+      saved++;
+
+      // 使われたタグのうち、まだタグ辞書に無いものを登録する（new_tags に説明があれば使う）
+      var desc = {};
+      (Array.isArray(it.new_tags) ? it.new_tags : []).forEach(function (t) {
+        if (t && t.tag) desc[String(t.category) + '\u0000' + String(t.tag).trim()] = text_(t.description, 200);
+      });
+      [['pain', it.pain_tags], ['change', it.change_tags]].forEach(function (pair) {
+        list_(pair[1]).forEach(function (t) {
+          var k = pair[0] + '\u0000' + t;
+          if (!known[k]) { known[k] = true; newTags.push({ tag: t, category: pair[0], description: desc[k] || '' }); }
+        });
       });
     });
-    append_('Tags', add);
+    append_('AI_Analysis', add);
+    append_('Tags', newTags);
+    return { saved: saved, skipped: skipped, new_tags: newTags.map(function (t) { return t.tag; }) };
   } finally {
     lock.releaseLock();
   }
-  return row;
 }
 
-/** Claude に頼み、schema どおりの JSON を受け取る */
-function callClaude_(key, system, userText, schema, effort) {
-  var body = {
-    model: AI_MODEL,
-    max_tokens: 16000,
-    output_config: {
-      effort: effort || 'medium',
-      format: { type: 'json_schema', schema: schema }
-    },
-    // 安全分類器で断られた場合はサーバー側で自動的に別モデルへ切り替える
-    fallbacks: 'default',
-    system: system,
-    messages: [{ role: 'user', content: userText }]
-  };
-  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'x-api-key': key,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'server-side-fallback-2026-07-01'
-    },
-    payload: JSON.stringify(body),
-    muteHttpExceptions: true
-  });
-  var code = res.getResponseCode();
-  var data = JSON.parse(res.getContentText() || '{}');
-  if (code !== 200) {
-    throw new Error('Claude API エラー (' + code + '): ' + (data.error && data.error.message || res.getContentText().slice(0, 300)));
-  }
-  if (data.stop_reason === 'refusal') throw new Error('AIがこの回答の分析を見送りました。');
-  if (data.stop_reason === 'max_tokens') throw new Error('AIの出力が長すぎて途中で切れました。');
-  var text = (data.content || []).filter(function (b) { return b.type === 'text'; })
-    .map(function (b) { return b.text; }).join('');
-  return JSON.parse(text);
+function text_(v, max) { return String(v === undefined || v === null ? '' : v).trim().slice(0, max); }
+
+function list_(v) {
+  var arr = Array.isArray(v) ? v : splitList_(v);
+  return arr.map(function (x) { return String(x).trim().slice(0, 60); }).filter(function (x) { return x !== ''; }).slice(0, 10);
 }
 
-/** 未分析の回答をまとめて分析（時間主導トリガーと管理画面ボタンから呼ぶ） */
-function analyzePending_(limit) {
-  if (!PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY')) {
-    return { analyzed: 0, remaining: 0, errors: ['ANTHROPIC_API_KEY が未設定です。'] };
-  }
-  var done = {};
-  readAll_('AI_Analysis').forEach(function (a) { done[a.response_id] = true; });
-  var pending = readAll_('Responses').filter(function (r) { return !done[r.response_id]; });
-  var start = Date.now();
-  var count = 0, errors = [];
-  for (var i = 0; i < pending.length && count < limit; i++) {
-    if (Date.now() - start > 240000) break; // GAS の6分制限に余裕を持たせる
-    try { analyzeResponse_(pending[i].response_id, false); count++; } catch (err) {
-      errors.push(pending[i].response_id + ': ' + err.message);
-      count++;
-    }
-  }
-  return { analyzed: count - errors.length, remaining: Math.max(pending.length - count, 0), errors: errors };
-}
-
-/** 時間主導トリガー用 */
-function analyzePendingTrigger() {
-  var r = analyzePending_(10);
-  console.log(JSON.stringify(r));
-}
-
-// ===== AiForm.gs =====
 /**
- * 管理画面の「AIで作る」「AIに修正依頼」。
- * AI が作った案は保存せずに返すだけ。管理画面で確認して「保存する」を押したときに初めて登録される。
+ * 以前の版が作った「10分ごとのAI分析」トリガーの後始末。
+ * 古いトリガーが動いたら、自分自身を消して何もしない。
  */
-
-var FORM_QUESTION_SCHEMA = {
-  type: 'object', additionalProperties: false,
-  required: ['question_id', 'text', 'help_text', 'type', 'required', 'choices', 'meaning_label',
-    'allow_other', 'scale_min', 'scale_max', 'label_min', 'label_max'],
-  properties: {
-    question_id: { type: 'string', description: '既存の質問を残す・直すときはその question_id。新しい質問は空文字' },
-    text: { type: 'string' },
-    help_text: { type: 'string', description: '補足説明。不要なら空文字' },
-    type: { type: 'string', enum: QUESTION_TYPES },
-    required: { type: 'boolean' },
-    choices: { type: 'array', items: { type: 'string' }, description: 'choice / checkbox / dropdown のときだけ。それ以外は空配列' },
-    meaning_label: { type: 'string', enum: Object.keys(MEANING_LABELS) },
-    allow_other: { type: 'boolean', description: 'choice / checkbox で「その他（自由記入）」を出すか' },
-    scale_min: { type: 'integer', description: 'scale のときの最小値（0 か 1）。それ以外は 1' },
-    scale_max: { type: 'integer', description: 'scale のときの最大値（2〜10）。それ以外は 10' },
-    label_min: { type: 'string', description: 'scale の最小値側の言葉。不要なら空文字' },
-    label_max: { type: 'string', description: 'scale の最大値側の言葉。不要なら空文字' }
-  }
-};
-
-var FORM_SURVEY_SCHEMA = {
-  type: 'object', additionalProperties: false,
-  required: ['title', 'description', 'questions', 'changes'],
-  properties: {
-    title: { type: 'string' },
-    description: { type: 'string', description: '回答者へのひと言（2〜4文）' },
-    questions: { type: 'array', items: FORM_QUESTION_SCHEMA },
-    changes: { type: 'array', items: { type: 'string' }, description: '作った・直した内容の要点（日本語で3〜8項目）' }
-  }
-};
-
-function formSystemPrompt_() {
-  var labels = Object.keys(MEANING_LABELS).map(function (k) { return k + '（' + MEANING_LABELS[k] + '）'; }).join('、');
-  return [
-    'あなたはコミュニティ「漢の福袋」のアンケート設計を手伝う担当です。',
-    '回答があとで人をまたいで分析できるアンケートを、日本語で設計してください。',
-    '',
-    '使える質問の形式（type）:',
-    'text=1行テキスト、textarea=複数行テキスト、choice=選択肢（1つ選ぶ）、checkbox=チェックボックス（複数回答）、',
-    'dropdown=プルダウン、scale=均等目盛（scale_min〜scale_max、両端の言葉は label_min / label_max）、',
-    'date=日付、time=時刻、email=メールアドレス、name=名前',
-    '',
-    '意味ラベル（meaning_label）: ' + labels,
-    '',
-    '設計のルール:',
-    '- 1問目は name（お名前）、2問目は email（メールアドレス、補足に「回答の控えをお送りします」）にする。',
-    '- 意味ラベルは質問の中身に合うものを選ぶ。悩み=pain、変化=change、成果=outcome のように、AI分析で集計しやすくする。',
-    '- 自由記述だけに頼らず、比べられる数値（scale）や選択肢の質問も入れる。',
-    '- 紹介文や声として使う可能性があるなら、掲載してよいかを選択肢で聞く。',
-    '- 1つの質問で2つのことを聞かない。答えやすい言葉にする。全体で回答10〜15分以内を目安にする。',
-    '- 必須は本当に必要なものだけにする。'
-  ].join('\n');
-}
-
-function apiAiDraftSurvey_(p) {
-  var key = requireAiKey_();
-  var purpose = String(p.purpose || '').trim(), audience = String(p.audience || '').trim(), goal = String(p.goal || '').trim();
-  if (!purpose || !audience || !goal) throw new Error('3つの質問すべてに答えてください。');
-  var userText = '次の条件でアンケートを新しく作ってください。question_id はすべて空文字にしてください。\n\n' +
-    '<purpose>' + purpose.slice(0, 2000) + '</purpose>\n<audience>' + audience.slice(0, 2000) + '</audience>\n<goal>' + goal.slice(0, 2000) + '</goal>';
-  return toEditorSurvey_(callClaude_(key, formSystemPrompt_(), userText, FORM_SURVEY_SCHEMA, 'low'));
-}
-
-function apiAiReviseSurvey_(p) {
-  var key = requireAiKey_();
-  var instruction = String(p.instruction || '').trim();
-  if (!instruction) throw new Error('どう直したいかを書いてください。');
-  var s = p.survey || {};
-  var current = {
-    title: s.title || '', description: s.description || '',
-    questions: (s.questions || []).map(function (q) {
-      return { question_id: q.question_id || '', text: q.text || '', help_text: q.help_text || '', type: q.type,
-        required: !!q.required, choices: [].concat(q.choices || []), meaning_label: q.meaning_label || 'other',
-        options: q.options || {} };
-    })
-  };
-  var userText = '今のアンケートを、依頼に沿って直してください。\n' +
-    '- 依頼に関係ない質問は、文言も question_id もそのまま残す（過去の回答とつながりを保つため）。\n' +
-    '- 削除する質問は出力から外す。新しい質問の question_id は空文字。\n\n' +
-    '<current_survey>' + JSON.stringify(current) + '</current_survey>\n\n<request>' + instruction.slice(0, 3000) + '</request>';
-  var out = toEditorSurvey_(callClaude_(key, formSystemPrompt_(), userText, FORM_SURVEY_SCHEMA, 'low'));
-  // AI が存在しない question_id を書いた場合は新しい質問として扱う
-  var known = {};
-  current.questions.forEach(function (q) { if (q.question_id) known[q.question_id] = true; });
-  out.questions.forEach(function (q) { if (!known[q.question_id]) q.question_id = ''; });
-  return out;
-}
-
-function requireAiKey_() {
-  var key = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_API_KEY');
-  if (!key) throw new Error('AIのキー（ANTHROPIC_API_KEY）が未設定のため、AI機能は使えません。');
-  return key;
-}
-
-/** AI の出力を、管理画面の編集画面がそのまま読める形にする */
-function toEditorSurvey_(r) {
-  return {
-    title: String(r.title || ''), description: String(r.description || ''), changes: r.changes || [],
-    questions: (r.questions || []).map(function (q) {
-      var type = QUESTION_TYPES.indexOf(q.type) >= 0 ? q.type : 'text';
-      return {
-        question_id: String(q.question_id || ''), text: String(q.text || ''), help_text: String(q.help_text || ''),
-        type: type, required: !!q.required,
-        choices: (type === 'choice' || type === 'checkbox' || type === 'dropdown') ? (q.choices || []) : [],
-        meaning_label: MEANING_LABELS[q.meaning_label] ? q.meaning_label : 'other',
-        options: normalizeOptions_(type, q)
-      };
-    })
-  };
+function analyzePendingTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'analyzePendingTrigger') ScriptApp.deleteTrigger(t);
+  });
 }
 
 // ===== Mail.gs =====
@@ -986,7 +762,6 @@ function sendCopyMail_(email, name, survey, answers) {
  * 初回だけ GAS エディタで「setup」を実行する。
  * - データ用スプレッドシートを作成（既にあれば足りないシートだけ追加）
  * - 管理者キーを自動生成してスクリプトプロパティ ADMIN_KEY に保存（コードには残らない）
- * - 未分析回答を10分ごとにAI分析するトリガーを設定
  * - サンプルのアンケートを1件作成
  */
 function setup() {
@@ -1017,14 +792,10 @@ function setup() {
     props.setProperty('ADMIN_KEY', Utilities.getUuid().replace(/-/g, ''));
   }
 
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'analyzePendingTrigger') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('analyzePendingTrigger').timeBased().everyMinutes(10).create();
+  analyzePendingTrigger(); // 以前の版の自動AI分析トリガーが残っていれば消す
 
   console.log('スプレッドシート: ' + ss.getUrl());
   console.log('管理者キーは「プロジェクトの設定 > スクリプト プロパティ > ADMIN_KEY」で確認してください。');
-  console.log('AI分析を使うには、スクリプト プロパティに ANTHROPIC_API_KEY を追加してください。');
 }
 
 var DEFAULT_TAGS = [

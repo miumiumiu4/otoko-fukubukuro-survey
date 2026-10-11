@@ -55,48 +55,4 @@ const dup = post({ action: 'duplicateSurvey', adminKey, survey_id: sid }).data.s
 const dq = post({ action: 'getSurveyFull', adminKey, survey_id: dup }).data.questions.find(x => x.text === '満足度');
 assert.strictEqual(dq.options.scale_max, 5);
 
-// AI：キーが無いと分かりやすく止まる
-let r = post({ action: 'aiDraftSurvey', adminKey, purpose: 'a', audience: 'b', goal: 'c' });
-assert.ok(!r.ok && /ANTHROPIC_API_KEY/.test(r.error));
-props.ANTHROPIC_API_KEY = 'k';
-let lastBody;
-gas.ctx.UrlFetchApp.fetch = (url, opt) => {
-  lastBody = JSON.parse(opt.payload);
-  const out = { title: '秋合宿アンケート', description: 'お疲れさまでした。', changes: ['満足度を追加'], questions: [
-    { question_id: 'qNOPE', text: 'お名前', help_text: '', type: 'name', required: true, choices: [], meaning_label: 'name', allow_other: false, scale_min: 1, scale_max: 10, label_min: '', label_max: '' },
-    { question_id: '', text: '満足度', help_text: '', type: 'scale', required: true, choices: ['x'], meaning_label: 'satisfaction', allow_other: false, scale_min: 1, scale_max: 5, label_min: '低い', label_max: '高い' },
-    { question_id: '', text: '良かった点', help_text: '', type: 'checkbox', required: false, choices: ['食事', '講義'], meaning_label: 'insight', allow_other: true, scale_min: 1, scale_max: 10, label_min: '', label_max: '' }
-  ] };
-  return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(out) }] }) };
-};
-// 閲覧専用は使えない
-const vk = post({ action: 'createKey', adminKey, name: '見る人', role: 'viewer' }).data.key;
-assert.strictEqual(post({ action: 'aiDraftSurvey', adminKey: vk, purpose: 'a', audience: 'b', goal: 'c' }).ok, false);
-assert.strictEqual(post({ action: 'aiDraftSurvey', adminKey, purpose: '', audience: 'b', goal: 'c' }).ok, false, '3つ全部必要');
-r = post({ action: 'aiDraftSurvey', adminKey, purpose: '秋合宿の振り返り', audience: '参加者', goal: '次回の企画' }).data;
-assert.strictEqual(lastBody.output_config.format.type, 'json_schema');
-assert.ok(lastBody.messages[0].content.includes('秋合宿の振り返り'));
-assert.strictEqual(r.questions[1].options.scale_max, 5);
-assert.deepStrictEqual(r.questions[1].choices, [], '目盛りに選択肢は持たせない');
-assert.deepStrictEqual(r.questions[2].options, { allow_other: true });
-assert.strictEqual(r.changes[0], '満足度を追加');
-assert.strictEqual(post({ action: 'listSurveys', adminKey }).data.length, 3, 'AIの案は保存されない');
-
-// 修正依頼：存在しない question_id は新しい質問扱い、実在するものは残す
-const full = post({ action: 'getSurveyFull', adminKey, survey_id: sid }).data;
-const realId = full.questions[0].question_id;
-gas.ctx.UrlFetchApp.fetch = (url, opt) => {
-  lastBody = JSON.parse(opt.payload);
-  const out = { title: full.title, description: '', changes: ['参加日を削除'], questions: [
-    { question_id: realId, text: 'お名前', help_text: '', type: 'name', required: true, choices: [], meaning_label: 'name', allow_other: false, scale_min: 1, scale_max: 10, label_min: '', label_max: '' },
-    { question_id: 'qFAKE', text: '新しい質問', help_text: '', type: 'text', required: false, choices: [], meaning_label: 'other', allow_other: false, scale_min: 1, scale_max: 10, label_min: '', label_max: '' }
-  ] };
-  return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(out) }] }) };
-};
-r = post({ action: 'aiReviseSurvey', adminKey, survey: full, instruction: '参加日の質問を消して' }).data;
-assert.ok(lastBody.messages[0].content.includes(realId) && lastBody.messages[0].content.includes('参加日の質問を消して'));
-assert.strictEqual(r.questions[0].question_id, realId);
-assert.strictEqual(r.questions[1].question_id, '');
-assert.strictEqual(post({ action: 'aiReviseSurvey', adminKey, survey: full, instruction: ' ' }).ok, false);
-
 console.log('OK: forms tests passed');

@@ -77,19 +77,25 @@ assert.strictEqual(dupFull.status, 'draft');
 assert.strictEqual(dupFull.questions.length, 11);
 assert.notStrictEqual(dupFull.questions[0].question_id, full2.questions[0].question_id);
 
-// AI：キー無し
+// AI分析：APIは呼ばず、Claude のチャットで作った結果を取り込む
 let dash = post({ action: 'dashboard', adminKey }).data;
-assert.strictEqual(dash.ai_ready, false);
 assert.strictEqual(dash.pending, 2);
-
-props.ANTHROPIC_API_KEY = 'test-key';
-const ap = post({ action: 'analyzePending', adminKey, limit: 5 });
-assert.ok(ap.ok && ap.data.analyzed === 2, JSON.stringify(ap));
-const call = gas.claudeCalls[0];
-assert.strictEqual(call.body.model, 'claude-opus-5-5');
-assert.strictEqual(call.opt.headers['x-api-key'], 'test-key');
-assert.ok(!call.body.messages[0].content.includes('taro@example.com'), 'メールはAIに送らない');
-assert.ok(call.body.messages[0].content.includes('自信がない'), '既存タグを渡す');
+assert.ok(!('ai_ready' in dash));
+const resIds = post({ action: 'listResponses', adminKey, survey_id: sid }).data.responses.map(r => r.response_id);
+const item = id => ({ response_id: id, summary: '自信がなかったが行動できるようになった', before_state: '自信がない', after_state: '毎朝走る',
+  pain_tags: ['自信がない'], change_tags: ['行動力が上がった', '朝型になった'], outcome_numbers: ['体重 -5kg'],
+  recommend_target: ['一歩踏み出せない30代'], best_quote: '人生が変わった3日間でした',
+  new_tags: [{ tag: '朝型になった', category: 'change', description: '早起きが習慣化' }] });
+let imp = post({ action: 'importAnalysis', adminKey, items: [item(resIds[0]), item(resIds[1]), item('r_not_exist')] });
+assert.ok(imp.ok, JSON.stringify(imp));
+assert.strictEqual(imp.data.saved, 2);
+assert.deepStrictEqual(imp.data.skipped, ['r_not_exist']);
+assert.deepStrictEqual(imp.data.new_tags, ['朝型になった']);
+// 同じ回答をもう一度取り込むと上書き（重複しない）
+assert.ok(post({ action: 'importAnalysis', adminKey, items: [item(resIds[0])] }).ok);
+assert.strictEqual(sheets.AI_Analysis._data.filter(r => r[0] === resIds[0]).length, 1);
+assert.strictEqual(post({ action: 'importAnalysis', adminKey, items: [] }).ok, false);
+assert.strictEqual(gas.claudeCalls.length, 0, '外部のAIには一切つながない');
 
 dash = post({ action: 'dashboard', adminKey, survey_id: sid }).data;
 assert.strictEqual(dash.analyzed, 2);
@@ -125,7 +131,7 @@ let v = post({ action: 'ping', adminKey: vw.key }).data.user;
 assert.deepStrictEqual([v.name, v.role], ['友達B', 'viewer']);
 assert.ok(post({ action: 'listResponses', adminKey: vw.key, survey_id: sid }).ok);
 assert.ok(post({ action: 'dashboard', adminKey: vw.key }).ok);
-for (const a of ['saveSurvey', 'duplicateSurvey', 'setStatus', 'analyzePending', 'saveTags', 'listKeys', 'createKey', 'revokeKey']) {
+for (const a of ['saveSurvey', 'duplicateSurvey', 'setStatus', 'importAnalysis', 'saveTags', 'listKeys', 'createKey', 'revokeKey']) {
   const r = post({ action: a, adminKey: vw.key, survey_id: sid, status: 'draft', survey: full2, tags: [] });
   assert.strictEqual(r.ok, false, a);
   assert.ok(/権限がありません/.test(r.error), a + ': ' + r.error);

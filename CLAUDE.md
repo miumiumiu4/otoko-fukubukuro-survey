@@ -12,3 +12,6 @@
 - 使い方動画の作り方は tools/howto-video/README.md。
 - 声入りの動画が必要なときは、公嗣さんに頼まず自動で作る：Google Drive コネクタで「ナレーション工房/依頼」に依頼 JSON を置き、5分ほどで「ナレーション工房/<ジョブ名>/」にできる MP3 を取り出して合成する（tools/voice-studio/README.md）。
   - 人名など読み間違えやすい語は、依頼の pronunciations にひらがなで入れる（例：入山→いりやま）。
+
+## お金の方針
+- このシステムでは、使った分だけ課金される API（Claude API など）を使わない。AI が必要な機能は「依頼文をコピー → Claude のチャットに貼る → 答えを貼り戻す」形にする（assets/ai-prompts.js）。

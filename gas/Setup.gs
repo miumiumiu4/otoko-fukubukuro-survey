@@ -2,7 +2,6 @@
  * 初回だけ GAS エディタで「setup」を実行する。
  * - データ用スプレッドシートを作成（既にあれば足りないシートだけ追加）
  * - 管理者キーを自動生成してスクリプトプロパティ ADMIN_KEY に保存（コードには残らない）
- * - 未分析回答を10分ごとにAI分析するトリガーを設定
  * - サンプルのアンケートを1件作成
  */
 function setup() {
@@ -33,14 +32,10 @@ function setup() {
     props.setProperty('ADMIN_KEY', Utilities.getUuid().replace(/-/g, ''));
   }
 
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'analyzePendingTrigger') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('analyzePendingTrigger').timeBased().everyMinutes(10).create();
+  analyzePendingTrigger(); // 以前の版の自動AI分析トリガーが残っていれば消す
 
   console.log('スプレッドシート: ' + ss.getUrl());
   console.log('管理者キーは「プロジェクトの設定 > スクリプト プロパティ > ADMIN_KEY」で確認してください。');
-  console.log('AI分析を使うには、スクリプト プロパティに ANTHROPIC_API_KEY を追加してください。');
 }
 
 var DEFAULT_TAGS = [
