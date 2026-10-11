@@ -188,3 +188,41 @@ input[type=date], input[type=time] {
 .ai-panel { border-color: var(--gold); }
 .ai-panel textarea { min-height: 70px; }
 .ai-changes { margin: 6px 0 0; padding-left: 1.2em; font-size: 14px; }
+
+/* アンケート一覧（数が増えても探しやすく） */
+.list-tools { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-bottom: 10px; }
+.list-tools select { width: auto; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.chip { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 16px; padding: 4px 12px; font-size: 13px; cursor: pointer; }
+.chip.on { border-color: var(--gold); color: var(--gold); background: rgba(201, 162, 74, .1); }
+.survey-list { display: grid; gap: 8px; }
+.srow { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.srow:hover { border-color: #4a3f22; }
+.srow-main { flex: 1; min-width: 0; cursor: pointer; }
+.srow-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.pending { color: var(--gold-soft); }
+.stat[role=button] { cursor: pointer; }
+details.more { position: relative; }
+details.more summary { list-style: none; }
+details.more summary::-webkit-details-marker { display: none; }
+.more-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 170px; display: grid;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.5); }
+.more-menu button { background: none; border: 0; text-align: left; padding: 8px 10px; border-radius: 4px; cursor: pointer; color: var(--text); }
+.more-menu button:hover { background: rgba(201, 162, 74, .12); }
+@media (max-width: 560px) {
+  .srow { flex-wrap: wrap; }
+  .srow-actions { width: 100%; justify-content: flex-end; }
+  .stats .v { font-size: 22px; }
+}
+
+/* スマホでは上部の帯を2段（ロゴとボタン／横にスクロールできるタブ）に収める */
+@media (max-width: 760px) {
+  .admin-head { display: grid; grid-template-columns: 1fr auto auto auto; gap: 6px 8px; padding: 8px 12px 0; }
+  .admin-head .logo { display: none; } /* 狭い画面では、ロゴより「誰の鍵で入っているか」を見せる */
+  .admin-head > .muted { align-self: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .admin-head .tabs { grid-column: 1 / -1; grid-row: 2; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 8px; }
+  .admin-head .tabs::-webkit-scrollbar { display: none; }
+  .admin-head .tabs button { white-space: nowrap; padding: 8px 10px; }
+  .admin-main { padding-top: 14px; }
+}

@@ -156,4 +156,15 @@ assert.strictEqual(post({ action: 'ping', adminKey: vw.key }).ok, false);
 assert.ok(post({ action: 'ping', adminKey: ed.key }).ok, '他の鍵は影響を受けない');
 assert.ok(post({ action: 'ping', adminKey }).ok, 'オーナーも影響を受けない');
 
+// まとめ取り：個別の問い合わせと同じ中身を1回で返す
+const snap = post({ action: 'snapshot', adminKey }).data;
+const lrAll = post({ action: 'listResponses', adminKey }).data.responses;
+assert.deepStrictEqual(snap.responses, lrAll);
+assert.deepStrictEqual(snap.surveys, post({ action: 'listSurveys', adminKey }).data);
+assert.deepStrictEqual(snap.questions[sid], post({ action: 'getSurveyFull', adminKey, survey_id: sid }).data.questions);
+assert.deepStrictEqual(snap.respondents, post({ action: 'listRespondents', adminKey }).data);
+assert.strictEqual(snap.user.role, 'owner');
+assert.ok(Array.isArray(snap.keys));
+assert.strictEqual(post({ action: 'snapshot', adminKey: ed.key }).data.keys, null, 'オーナー以外には鍵の一覧を返さない');
+
 console.log('OK: all GAS tests passed');

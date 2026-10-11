@@ -59,7 +59,7 @@ function createGas() {
   };
   vm.createContext(ctx);
   const dir = path.join(__dirname, '..', 'gas');
-  for (const f of ['Db.gs', 'Keys.gs', 'Api.gs', 'Ai.gs', 'Mail.gs', 'Setup.gs']) vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
+  for (const f of ['Db.gs', 'Keys.gs', 'Api.gs', 'Snapshot.gs', 'Ai.gs', 'Mail.gs', 'Setup.gs']) vm.runInContext(fs.readFileSync(path.join(dir, f), 'utf8'), ctx, { filename: f });
   const post = body => ctx.doPost({ postData: { contents: JSON.stringify(body) } });
   return { ctx, post, props, sheets, mails, get claudeCalls() { return claudeCalls; } };
 }

@@ -14,6 +14,7 @@ var ADMIN_ACTIONS = {
   ping: ['viewer', function (p, user) {
     return { labels: MEANING_LABELS, types: QUESTION_TYPES, user: user, roles: ROLES };
   }],
+  snapshot: ['viewer', function (p, user) { return apiSnapshot_(p, user); }],
   listSurveys: ['viewer', apiListSurveys_],
   getSurveyFull: ['viewer', apiGetSurveyFull_],
   listResponses: ['viewer', apiListResponses_],

@@ -15,23 +15,124 @@
   function can(role) { return ROLE_RANK[(state.user || {}).role] >= ROLE_RANK[role]; }
 
   /* ---------- 共通 ---------- */
-  // GAS（スプレッドシート）への問い合わせは1回1〜数秒かかる。
-  // 読むだけの問い合わせは結果を手元に覚えておき、タブを切り替えたときはすぐ表示する。
-  // 覚えてから30秒以上たっていたら、表示はそのままにして裏で取り直し、変わっていれば描き直す。
+  // GAS（スプレッドシート）への問い合わせは1回1〜数秒かかり、スマホでは同時に何本も送ると詰まる。
+  // そこで「まとめ取り（snapshot）」1回で全データを手元に持ち、各画面はそこから作る（通信なし）。
+  // 30秒以上たっていたら、表示はそのままで裏で取り直し、変わっていれば静かに描き直す。
+  // まとめ取りに対応していない古い GAS のときは、画面ごとに問い合わせる方式に戻る。
   var READ_ACTIONS = { ping: 1, listSurveys: 1, getSurveyFull: 1, listResponses: 1, listRespondents: 1, dashboard: 1, listTags: 1, listKeys: 1 };
   var FRESH_MS = 30000;
+  var SNAP_STORE = 'ofs-admin-snapshot';
   var cache = {};
+  var snap = null, snapAt = 0, snapPending = null, snapSupported = true;
   function fetchApi(action, params) {
     return api.call(action, Object.assign({ adminKey: state.key }, params || {}));
   }
   function cacheKey(action, params) { return action + ':' + JSON.stringify(params || {}); }
-  function clearCache() { cache = {}; }
+  function clearCache() {
+    cache = {}; snap = null; snapAt = 0;
+    try { sessionStorage.removeItem(SNAP_STORE); } catch (e) {}
+  }
+  // 再読み込み（スマホでよく起きる）でもすぐ表示できるよう、このタブの中だけに覚えておく
+  function restoreSnapshot() {
+    try {
+      var saved = JSON.parse(sessionStorage.getItem(SNAP_STORE) || 'null');
+      if (saved && saved.key === state.key) { snap = saved.data; snapAt = 0; }
+    } catch (e) {}
+  }
+  function loadSnapshot() {
+    if (snapPending) return snapPending;
+    snapPending = fetchApi('snapshot').then(function (data) {
+      snap = data; snapAt = Date.now(); snapPending = null;
+      try { sessionStorage.setItem(SNAP_STORE, JSON.stringify({ key: state.key, data: data })); } catch (e) {}
+      return data;
+    }, function (e) {
+      snapPending = null;
+      if (/不明な操作/.test(e.message)) snapSupported = false;
+      // 鍵が停止された・違う場合は、手元に残ったデータを見せ続けない
+      if (/管理者キー/.test(e.message) && state.user) logout();
+      throw e;
+    });
+    return snapPending;
+  }
+
+  function rank(m) {
+    return Object.keys(m).map(function (k) { return { tag: k, count: m[k] }; })
+      .sort(function (a, b) { return b.count - a.count || a.tag.localeCompare(b.tag); });
+  }
+  // まとめ取りしたデータから、各画面が欲しい形を作る（GAS の各 api と同じ形）
+  function derive(action, p) {
+    p = p || {};
+    var S = snap;
+    if (action === 'ping') return { labels: S.labels, types: S.types, user: S.user, roles: S.roles };
+    if (action === 'listSurveys') return S.surveys;
+    if (action === 'listRespondents') return S.respondents;
+    if (action === 'listTags') return S.tags;
+    if (action === 'listKeys') {
+      if (!S.keys) throw new Error('この操作をする権限がありません。');
+      return S.keys;
+    }
+    if (action === 'getSurveyFull') {
+      var sv = S.surveys.filter(function (x) { return x.survey_id === p.survey_id; })[0];
+      if (!sv) throw new Error('アンケートが見つかりません。');
+      return Object.assign({}, sv, { questions: S.questions[p.survey_id] || [] });
+    }
+    if (action === 'listResponses') {
+      return {
+        questions: p.survey_id ? (S.questions[p.survey_id] || []) : [],
+        responses: S.responses.filter(function (r) {
+          return (!p.survey_id || r.survey_id === p.survey_id) && (!p.respondent_id || r.respondent_id === p.respondent_id);
+        })
+      };
+    }
+    if (action === 'dashboard') {
+      var rs = S.responses.filter(function (r) { return !p.survey_id || r.survey_id === p.survey_id; });
+      var pain = {}, change = {}, targets = {}, outcomes = [], quotes = [], analyzed = 0;
+      rs.forEach(function (r) {
+        var a = r.ai;
+        if (!a) return;
+        analyzed++;
+        var meta = { response_id: r.response_id, name: r.name || '（名前なし）', survey_title: r.survey_title,
+          submitted_at: r.submitted_at, respondent_id: r.respondent_id };
+        list(a.pain_tags).forEach(function (t) { pain[t] = (pain[t] || 0) + 1; });
+        list(a.change_tags).forEach(function (t) { change[t] = (change[t] || 0) + 1; });
+        list(a.recommend_target).forEach(function (t) { targets[t] = (targets[t] || 0) + 1; });
+        list(a.outcome_numbers).forEach(function (o) { outcomes.push(Object.assign({ text: o }, meta)); });
+        if (a.best_quote) quotes.push(Object.assign({ text: a.best_quote, summary: a.summary }, meta));
+      });
+      return { total_responses: rs.length, analyzed: analyzed, pending: rs.length - analyzed,
+        pain_ranking: rank(pain), change_ranking: rank(change), recommend_ranking: rank(targets),
+        outcomes: outcomes, quotes: quotes };
+    }
+    throw new Error('不明な操作です: ' + action);
+  }
+
   function call(action, params) {
     if (!READ_ACTIONS[action]) {
-      // 書き込みのあとは、覚えている内容が古くなるので捨てる
+      // 書き込みのあとは、手元のデータが古くなるので捨てて、裏で取り直す
       return fetchApi(action, params).then(function (r) { clearCache(); prefetch(); return r; });
     }
-    // 人別の履歴は、全回答をもう持っていればその中から絞り込む（問い合わせなし）
+    if (snapSupported) {
+      if (!snap) {
+        return loadSnapshot().then(function () { return derive(action, params); }, function (e) {
+          if (!snapSupported) return cachedCall(action, params);
+          throw e;
+        });
+      }
+      if (Date.now() - snapAt > FRESH_MS && !snapPending) refreshSnapshot();
+      try { return Promise.resolve(derive(action, params)); } catch (e) { return Promise.reject(e); }
+    }
+    return cachedCall(action, params);
+  }
+  function refreshSnapshot() {
+    var before = JSON.stringify(snap), tab = state.tab, arg = state.arg;
+    loadSnapshot().then(function (data) {
+      // 見ている画面が同じで、中身が変わっていたら静かに描き直す（編集中の画面は描き直さない）
+      if (JSON.stringify(data) !== before && state.tab === tab && state.arg === arg && tab !== 'edit' && tab !== 'templates') go(tab, arg, true);
+    }, function () {});
+  }
+
+  // 古い GAS 用：画面ごとに問い合わせ、結果を覚えておく
+  function cachedCall(action, params) {
     if (action === 'listResponses' && params && params.respondent_id && !params.survey_id) {
       var all = cache[cacheKey('listResponses', {})];
       if (all && all.data) {
@@ -58,18 +159,18 @@
     fetchApi(action, params).then(function (data) {
       var changed = JSON.stringify(data) !== JSON.stringify(hit.data);
       cache[key] = { data: data, at: Date.now() };
-      // 見ている画面が同じで、中身が変わっていたら静かに描き直す（編集中の画面は描き直さない）
       if (changed && state.tab === tab && state.arg === arg && tab !== 'edit' && tab !== 'templates') go(tab, arg, true);
     }, function () { hit.refreshing = false; });
   }
-  // ログイン直後に、よく見る画面のデータをまとめて取っておく
+  // ログイン直後や書き込みのあとに、データを裏で取っておく
   function prefetch() {
-    ['listSurveys', 'listRespondents', 'listTags'].forEach(function (a) { call(a).catch(function () {}); });
-    call('listResponses', {}).catch(function () {});
-    call('dashboard', { survey_id: '' }).catch(function () {});
-    if (can('owner')) call('listKeys').catch(function () {});
-    call('listSurveys').then(function (list) {
-      list.forEach(function (s) { call('listResponses', { survey_id: s.survey_id }).catch(function () {}); });
+    if (snapSupported) { loadSnapshot().catch(function () {}); return; }
+    ['listSurveys', 'listRespondents', 'listTags'].forEach(function (a) { cachedCall(a).catch(function () {}); });
+    cachedCall('listResponses', {}).catch(function () {});
+    cachedCall('dashboard', { survey_id: '' }).catch(function () {});
+    if (can('owner')) cachedCall('listKeys').catch(function () {});
+    cachedCall('listSurveys').then(function (lst) {
+      lst.forEach(function (sv) { cachedCall('listResponses', { survey_id: sv.survey_id }).catch(function () {}); });
     }).catch(function () {});
   }
   function reloadAll() {
@@ -155,13 +256,15 @@
   }
   async function login(key) {
     state.key = key;
+    restoreSnapshot();
     root.replaceChildren(loading());
     try {
       var meta = await call('ping');
       state.labels = meta.labels;
       // 鍵の仕組みが入る前のGASは user を返さないので、オーナー扱いにする
       state.user = meta.user || { name: 'オーナー', role: 'owner' };
-      prefetch();
+      // 前回のデータで先に表示した場合は、裏で取り直して最新にする
+      if (snap && snapAt === 0) refreshSnapshot(); else if (!snap) prefetch();
       try { sessionStorage.setItem(KEY_STORE, key); } catch (e) {}
       renderShell();
     } catch (e) {
@@ -216,48 +319,132 @@
     state.surveys = await call('listSurveys');
     return state.surveys;
   }
+  // 状態ごとにまとめた選択欄（公開中 → 下書き → 停止中の順）
   function surveySelect(selected, includeAll, onchange) {
     var sel = h('select', { onchange: function () { onchange(sel.value); } },
-      (includeAll ? [h('option', { value: '', text: 'すべてのアンケート' })] : []).concat(state.surveys.map(function (s) {
-        return h('option', { value: s.survey_id, text: s.title + '（' + s.response_count + '件）', selected: s.survey_id === selected });
+      (includeAll ? [h('option', { value: '', text: 'すべてのアンケート' })] : []).concat(['published', 'draft', 'closed'].map(function (st) {
+        var group = state.surveys.filter(function (x) { return x.status === st; });
+        if (!group.length) return null;
+        return h('optgroup', { label: STATUS_LABELS[st] }, group.map(function (x) {
+          return h('option', { value: x.survey_id, text: x.title + '（' + x.response_count + '件）', selected: x.survey_id === selected });
+        }));
       })));
     sel.style.maxWidth = '420px';
     return sel;
   }
 
   /* ---------- アンケート一覧 ---------- */
+  // 数が増えても探しやすいように、検索・状態の絞り込み・並べ替えができる一覧にする（選んだ条件はこの端末に覚える）
+  var LIST_PREF = 'ofs-survey-list';
+  function listPref() {
+    try { return Object.assign({ q: '', status: 'active', sort: 'recent' }, JSON.parse(localStorage.getItem(LIST_PREF) || '{}')); }
+    catch (e) { return { q: '', status: 'active', sort: 'recent' }; }
+  }
+  function saveListPref(p) { try { localStorage.setItem(LIST_PREF, JSON.stringify(p)); } catch (e) {} }
+
   async function viewSurveys() {
     var token = navSeq; // 後から別のタブに移ったら、この画面は描かない
     var surveys = await run(loadSurveys);
     if (!surveys) return;
-    var items = surveys.map(function (s) {
-      var statusBtns = [];
-      if (!can('editor')) {} else if (s.status !== 'published') statusBtns.push(h('button', { class: 'btn small', text: '公開する', onclick: function () { setStatus(s, 'published'); } }));
-      if (can('editor') && s.status === 'published') statusBtns.push(h('button', { class: 'btn small danger', text: '停止する', onclick: function () { setStatus(s, 'closed'); } }));
-      if (can('editor') && s.status === 'closed') statusBtns.push(h('button', { class: 'btn small', text: '下書きに戻す', onclick: function () { setStatus(s, 'draft'); } }));
-      return h('div', { class: 'card' }, [
-        h('div', { class: 'row between' }, [
-          h('div', {}, [h('strong', { text: s.title }), ' ', h('span', { class: 'badge ' + s.status, text: STATUS_LABELS[s.status] || s.status })]),
-          h('span', { class: 'muted small', text: '回答 ' + s.response_count + '件 ・ 作成 ' + fmt(s.created_at) })
-        ]),
-        h('p', { class: 'muted small', text: surveyUrl(s.survey_id) }),
-        h('div', { class: 'row' }, [
-          h('button', { class: 'btn small', text: can('editor') ? '編集' : '質問を見る', onclick: function () { go('edit', s.survey_id); } }),
-          can('editor') ? h('button', { class: 'btn small', text: '複製', onclick: function () { duplicate(s); } }) : null
-        ].concat(statusBtns).concat([
-          h('button', { class: 'btn small', text: 'URLをコピー', onclick: function () { copy(surveyUrl(s.survey_id)); } }),
-          h('a', { class: 'btn small', href: surveyUrl(s.survey_id), target: '_blank', rel: 'noopener', text: '回答ページを開く' }),
-          h('button', { class: 'btn small', text: '回答を見る', onclick: function () { go('responses', s.survey_id); } })
-        ]))
-      ]);
+    // 最終回答日と未分析の数（まとめ取りのデータがあれば計算する）
+    var stats = {};
+    ((snap && snap.responses) || []).forEach(function (r) {
+      var st = stats[r.survey_id] = stats[r.survey_id] || { last: '', pending: 0 };
+      if (String(r.submitted_at) > st.last) st.last = r.submitted_at;
+      if (!r.ai) st.pending++;
     });
-    paint(token, 
+    var pref = listPref();
+    var FILTERS = [['active', '公開中・下書き'], ['published', '公開中'], ['draft', '下書き'], ['closed', '停止中'], ['all', 'すべて']];
+    var SORTS = { recent: '新しく作った順', activity: '最近回答があった順', responses: '回答が多い順', title: '名前順' };
+    function count(f) {
+      return surveys.filter(function (x) { return f === 'all' || (f === 'active' ? x.status !== 'closed' : x.status === f); }).length;
+    }
+
+    var search = h('input', { type: 'search', id: 'survey-search', value: pref.q, placeholder: 'タイトルで探す' });
+    var sortSel = h('select', { id: 'survey-sort' }, Object.keys(SORTS).map(function (k) { return h('option', { value: k, text: SORTS[k], selected: pref.sort === k }); }));
+    var chips = h('div', { class: 'chips', role: 'tablist' });
+    var listBox = h('div', { class: 'survey-list' });
+
+    function moreMenu(x) {
+      var items = [];
+      if (can('editor')) {
+        items.push(['複製する', function () { duplicate(x); }]);
+        if (x.status !== 'published') items.push(['公開する', function () { setStatus(x, 'published'); }]);
+        if (x.status === 'published') items.push(['受付を停止する', function () { setStatus(x, 'closed'); }]);
+        if (x.status === 'closed') items.push(['下書きに戻す', function () { setStatus(x, 'draft'); }]);
+      }
+      items.push(['回答URLをコピー', function () { copy(surveyUrl(x.survey_id)); }]);
+      items.push(['回答ページを開く', function () { window.open(surveyUrl(x.survey_id), '_blank', 'noopener'); }]);
+      items.push(['AI分析を見る', function () { go('dashboard', x.survey_id); }]);
+      var menu = h('details', { class: 'more' }, [
+        h('summary', { class: 'btn small', 'aria-label': 'その他の操作', text: '…' }),
+        h('div', { class: 'more-menu' }, items.map(function (it) {
+          return h('button', { type: 'button', text: it[0], onclick: function () { menu.open = false; it[1](); } });
+        }))
+      ]);
+      return menu;
+    }
+
+    function draw() {
+      pref.q = search.value.trim(); pref.sort = sortSel.value; saveListPref(pref);
+      chips.replaceChildren.apply(chips, FILTERS.map(function (f) {
+        return h('button', { type: 'button', class: 'chip' + (pref.status === f[0] ? ' on' : ''), role: 'tab',
+          text: f[1] + ' ' + count(f[0]), onclick: function () { pref.status = f[0]; draw(); } });
+      }));
+      var kw = pref.q.toLowerCase();
+      var rows = surveys.filter(function (x) {
+        if (pref.status === 'active' && x.status === 'closed') return false;
+        if (pref.status !== 'active' && pref.status !== 'all' && x.status !== pref.status) return false;
+        return !kw || String(x.title).toLowerCase().indexOf(kw) >= 0;
+      }).sort(function (a, b) {
+        if (pref.sort === 'responses') return b.response_count - a.response_count;
+        if (pref.sort === 'title') return String(a.title).localeCompare(String(b.title), 'ja');
+        if (pref.sort === 'activity') return String((stats[b.survey_id] || {}).last || '').localeCompare(String((stats[a.survey_id] || {}).last || ''));
+        return String(b.created_at).localeCompare(String(a.created_at));
+      });
+      if (!rows.length) {
+        listBox.replaceChildren(h('p', { class: 'muted', text: surveys.length ? '条件に合うアンケートがありません。' : 'まだアンケートがありません。' }));
+        return;
+      }
+      listBox.replaceChildren.apply(listBox, rows.map(function (x) {
+        var st = stats[x.survey_id] || {};
+        var meta = '回答 ' + x.response_count + '件' + (st.last ? ' ・ 最終回答 ' + fmt(st.last) : '') + ' ・ 作成 ' + fmt(x.created_at).slice(0, 10);
+        return h('div', { class: 'srow' }, [
+          h('div', { class: 'srow-main', role: 'button', tabindex: '0', onclick: function () { go('responses', x.survey_id); },
+            onkeydown: function (e) { if (e.key === 'Enter') go('responses', x.survey_id); } }, [
+            h('div', { class: 'srow-title' }, [h('span', { class: 'badge ' + x.status, text: STATUS_LABELS[x.status] || x.status }), ' ', h('strong', { text: x.title })]),
+            h('div', { class: 'muted small' }, [meta, st.pending ? h('span', { class: 'pending', text: ' ・ 未分析 ' + st.pending + '件' }) : null])
+          ]),
+          h('div', { class: 'srow-actions' }, [
+            h('button', { class: 'btn small', type: 'button', text: '回答', onclick: function () { go('responses', x.survey_id); } }),
+            h('button', { class: 'btn small', type: 'button', text: can('editor') ? '編集' : '質問', onclick: function () { go('edit', x.survey_id); } }),
+            moreMenu(x)
+          ])
+        ]);
+      }));
+    }
+    search.addEventListener('input', draw);
+    sortSel.addEventListener('change', draw);
+    draw();
+
+    var published = surveys.filter(function (x) { return x.status === 'published'; }).length;
+    var totalRes = surveys.reduce(function (n, x) { return n + Number(x.response_count || 0); }, 0);
+    var pendingAll = Object.keys(stats).reduce(function (n, k) { return n + stats[k].pending; }, 0);
+    paint(token,
       h('div', { class: 'row between' }, [h('h2', { text: 'アンケート' }),
         h('div', { class: 'row' }, [
           can('editor') && (window.SURVEY_TEMPLATES || []).length ? h('button', { class: 'btn', text: 'テンプレートから作成', onclick: function () { go('templates'); } }) : null,
           can('editor') ? h('button', { class: 'btn primary', text: '＋ 新規作成', onclick: function () { go('edit', null); } }) : null
         ])]),
-      items.length ? h('div', {}, items) : h('p', { class: 'muted', text: 'まだアンケートがありません。' })
+      h('div', { class: 'stats' }, [
+        h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(published) }), h('div', { class: 'l', text: '公開中のアンケート' })]),
+        h('div', { class: 'stat' }, [h('div', { class: 'v', text: String(totalRes) }), h('div', { class: 'l', text: '回答の合計' })]),
+        h('div', { class: 'stat', role: pendingAll ? 'button' : null, onclick: pendingAll ? function () { go('dashboard'); } : null },
+          [h('div', { class: 'v', text: String(pendingAll) }), h('div', { class: 'l', text: '未分析の回答' + (pendingAll ? '（タップで分析へ）' : '') })])
+      ]),
+      h('div', { class: 'list-tools' }, [search, sortSel]),
+      chips,
+      listBox
     );
   }
   async function setStatus(s, status) {
